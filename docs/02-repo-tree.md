@@ -8,7 +8,7 @@ maps onto the same tree. The structure reflects the spec's module-scoped archite
 `module_code` seam for future modules without building tenant management.
 
 ```
-AzureAPProject/
+AzureARLyonsProject/
 ├─ docs/                          # this planning package + ADRs + runbooks
 │  ├─ 00-first-response.md
 │  ├─ 01-architecture.md … 10-risks-assumptions.md
