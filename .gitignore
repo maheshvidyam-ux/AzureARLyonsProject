@@ -1,0 +1,43 @@
+# Secrets & local config — NEVER commit (spec §3, §12: no embedded secrets)
+*.env
+.env.*
+*.pfx
+*.pem
+*.key
+secrets.*
+**/local.settings.json
+.claude/settings.local.json
+
+# Terraform state & vars
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.example.tfvars
+
+# Node / TS
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Python (if backend chosen that way)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+
+# Working / scratch artifacts
+spec_extracted.txt
+
+# Sample PO documents may contain customer PII — keep real samples out of VCS by default.
+# Commit only synthetic/redacted samples under samples/ and whitelist them explicitly.
+samples/**/*.pdf
+!samples/**/*.redacted.pdf
