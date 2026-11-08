@@ -1,0 +1,51 @@
+name: Infra Plan (dev)
+
+# PR-gated `terraform plan` for infra changes (spec §15 / §18 — no unreviewed infra deploys).
+# Authenticates to Azure with OIDC (no long-lived secrets). This job SKIPS cleanly unless the
+# repo is configured with the AZURE_* variables below, so it never blocks unconfigured forks.
+on:
+  pull_request:
+    paths:
+      - "infra/terraform/**"
+      - ".github/workflows/infra-plan.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # required for azure/login OIDC
+  pull-requests: write
+
+jobs:
+  plan:
+    name: terraform plan (dev)
+    runs-on: ubuntu-latest
+    # Configure these as repository/environment Variables + Secrets to enable the job.
+    if: ${{ vars.AZURE_CLIENT_ID != '' }}
+    environment: dev
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      # Terraform input variables (see infra/terraform/envs/dev/variables.tf)
+      TF_VAR_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_name_suffix: ${{ vars.COA_NAME_SUFFIX }}
+      TF_VAR_fabric_admin_members: ${{ vars.COA_FABRIC_ADMIN_MEMBERS }} # JSON list, e.g. ["id@tenant"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: terraform plan
+        working-directory: infra/terraform/envs/dev
+        run: |
+          terraform init -input=false
+          terraform plan -input=false -no-color

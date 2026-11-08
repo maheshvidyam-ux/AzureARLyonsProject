@@ -34,10 +34,11 @@ sales orders → learn from every correction.
 
 ## The three load-bearing design invariants (from the spec)
 
-1. **PostgreSQL is the operational source of truth** for state, corrections, jobs, audit and duplicate
-   reservations. **Fabric is read-only reference data + the order-integration staging destination.**
-   **Blob holds original documents. Boomi owns AX integration.** "AI suggests; deterministic rules
-   authorize staging." (§2)
+1. **A SQL database in Fabric is the operational source of truth** for state, corrections, jobs, audit
+   and duplicate reservations (transactional OLTP — ADR 0007, supersedes ADR 0001's PostgreSQL choice).
+   **The Fabric Lakehouse/Warehouse is read-only reference data + the order-integration staging
+   destination.** **Blob holds original documents. Boomi owns AX integration.** "AI suggests;
+   deterministic rules authorize staging." (§2)
 2. **No invalid or duplicate order may ever reach AX.** Duplicates are blocked across *both* Email and
    EDI channels via an atomic PostgreSQL claim on `normalized_customer_PO + AX_customer_account +
    legal_entity`, coordinated cross-channel with Boomi/AX. (§8, §16)

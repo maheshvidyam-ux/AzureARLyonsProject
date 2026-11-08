@@ -93,7 +93,7 @@ Simple (user-facing) statuses map onto granular internal states:
 |---|---|---|
 | **API service** | OIDC auth, reviewer/admin REST, Graph webhook receiver + validation, enqueue jobs, serve documents/evidence | hold long-running work; be the source of workflow truth for email state |
 | **Workers** | OCR, AI interpretation, validation, duplicate claim, publishing, reconciliation sweepers | write directly to AX; bypass the outbox |
-| **PostgreSQL** | operational source of truth: orders, validation, jobs, audit, duplicate claims, outbox, learning store | hold reference master data as authority |
+| **SQL database in Fabric** (ADR 0007; was PostgreSQL) | operational source of truth: orders, validation, jobs, audit, duplicate claims, outbox, learning store | hold reference master data as authority; be left on pausable/throttled capacity |
 | **Fabric** | authoritative read of customer/item masters; staging destination for approved orders | be assumed transactional — see §11 constraint |
 | **Blob** | immutable original documents + raw OCR payloads under retention | — |
 | **Service Bus** | durable work queues, dead-letter, retry/backoff | — |

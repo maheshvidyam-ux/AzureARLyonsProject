@@ -1,6 +1,11 @@
 # 03 — Operational Data Model (ERD)
 
-Covers spec §12. PostgreSQL is the operational source of truth. All internal IDs are UUIDs; every row
+> **Engine update (ADR 0007):** the operational store is a **SQL database in Fabric** (T-SQL / SQL
+> Server engine), superseding ADR 0001's PostgreSQL. The entities and keys below are unchanged; the
+> physical DDL is T-SQL in `db/migrations/` (e.g. `jsonb`→`nvarchar(max)`+`ISJSON`, partial unique
+> index→filtered unique index). Read "PostgreSQL" below as "the operational store."
+
+Covers spec §12. The operational store is the source of truth. All internal IDs are UUIDs; every row
 carries `company_id` (legal entity / `dataAreaId`), `source_channel`, row-version/concurrency fields,
 and created/updated timestamps. Indices on customer/PO/company and on queue/status columns.
 

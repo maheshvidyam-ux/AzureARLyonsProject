@@ -1,0 +1,11 @@
+{
+  "name": "@coa/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@coa/messaging": "*",
+    "fastify": "^5.12.8"
+  }
+}

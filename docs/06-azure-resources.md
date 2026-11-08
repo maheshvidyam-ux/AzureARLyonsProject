@@ -11,7 +11,7 @@ endpoints where supported; no secrets in code or state.
 |---|---|---|---|---|
 | 1 | Container Apps Environment | Azure Container Apps | Hosts `web`, `api`, `workers` as independently scalable apps | VNet-integrated; scale-to-zero only for non-critical |
 | 2 | Container Registry | Azure Container Registry (ACR) | Build/push app images | Managed-identity pull; no admin user |
-| 3 | PostgreSQL | Azure Database for PostgreSQL Flexible Server | Operational source of truth (§2) | Private endpoint; AAD auth; PITR backups; HA in prod |
+| 3 | ~~PostgreSQL~~ **SQL database in Fabric** (ADR 0007) | Microsoft Fabric (Fabric capacity → workspace → SQL database) | Operational source of truth (§2) — transactional OLTP | Entra auth; auto-mirrors to OneLake; **no-pause capacity policy** required (ADR 0007 #1). Terraform: `modules/fabric-sqldb` |
 | 4 | Service Bus | Azure Service Bus (Standard/Premium) | Durable queues/topics, DLQ, retry/backoff | Premium in prod for VNet + throughput |
 | 5 | Blob Storage | Azure Storage (Blob) | Original documents + raw OCR payloads | Private endpoint; lifecycle/retention; immutable where required |
 | 6 | Key Vault | Azure Key Vault | Secrets, connection strings, signing material | Managed-identity access; purge protection in prod |

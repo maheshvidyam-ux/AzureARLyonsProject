@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored (may hold ids).
+subscription_id = "00000000-0000-0000-0000-000000000000"
+location        = "eastus"
+environment     = "dev"
+
+# Short lowercase-alphanumeric token (3-6 chars) appended to globally-unique resource names
+# (storage account, ACR, Key Vault, Service Bus, Fabric capacity). Pick something unlikely to
+# collide, e.g. initials + number.
+name_suffix = "ab12"
+
+# Fabric capacity administrators — UPNs or service-principal object ids.
+fabric_admin_members = [
+  "you@yourtenant.onmicrosoft.com",
+]
