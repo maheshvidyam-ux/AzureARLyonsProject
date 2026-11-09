@@ -15,9 +15,14 @@ export interface GraphMailboxConfig {
   baseUrl?: string;
 }
 
-export function createDefaultGraphMailboxSource(config: GraphMailboxConfig): GraphMailboxSource {
+/** Real Graph API client with Entra auth (managed identity / az login / service principal). */
+export function createDefaultGraphApiClient(baseUrl?: string): HttpGraphApiClient {
   const credential = new DefaultAzureCredential() as unknown as AzureTokenCredential;
-  const client = new HttpGraphApiClient({ credential, baseUrl: config.baseUrl });
+  return new HttpGraphApiClient({ credential, baseUrl });
+}
+
+export function createDefaultGraphMailboxSource(config: GraphMailboxConfig): GraphMailboxSource {
+  const client = createDefaultGraphApiClient(config.baseUrl);
   return new GraphMailboxSource({
     client,
     mailbox: config.mailbox,

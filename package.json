@@ -31,11 +31,14 @@
     "vitest": "^2.1.8"
   },
   "dependencies": {
+    "@azure/ai-form-recognizer": "^5.1.0",
     "@azure/identity": "^4.14.1",
     "@azure/service-bus": "^7.10.0",
+    "@azure/storage-blob": "^12.34.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
     "fastify": "^5.12.8",
-    "mssql": "^11.0.2"
+    "mssql": "^11.0.2",
+    "openai": "^4.104.0"
   }
 }

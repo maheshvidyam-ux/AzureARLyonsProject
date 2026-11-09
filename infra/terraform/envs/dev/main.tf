@@ -98,6 +98,17 @@ module "fabric_sqldb" {
   tags                   = local.tags
 }
 
+module "ai" {
+  source               = "../../modules/ai"
+  name_prefix          = local.name_prefix
+  location             = var.location
+  resource_group_name  = azurerm_resource_group.this.name
+  di_name              = "di${local.compact}${var.name_suffix}"
+  openai_name          = "oai${local.compact}${var.name_suffix}"
+  reader_principal_ids = local.worker_principals
+  tags                 = local.tags
+}
+
 module "container_apps" {
   source                         = "../../modules/container-apps"
   name_prefix                    = local.name_prefix

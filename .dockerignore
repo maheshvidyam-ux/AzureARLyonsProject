@@ -1,0 +1,13 @@
+**/node_modules
+.git
+.github
+infra
+docs
+mocks
+tests
+**/*.test.ts
+**/tsconfig.tsbuildinfo
+coverage
+.terraform
+*.tfstate*
+scratchpad

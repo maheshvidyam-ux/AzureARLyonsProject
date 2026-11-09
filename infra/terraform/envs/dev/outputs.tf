@@ -9,4 +9,8 @@ output "blob_endpoint" { value = module.blob.primary_blob_endpoint }
 output "fabric_workspace_id" { value = module.fabric_sqldb.workspace_id }
 output "fabric_sql_database_id" { value = module.fabric_sqldb.sql_database_id }
 
+output "doc_intelligence_endpoint" { value = module.ai.doc_intelligence_endpoint }
+output "openai_endpoint" { value = module.ai.openai_endpoint }
+output "openai_deployment_name" { value = module.ai.openai_deployment_name }
+
 output "managed_identity_client_ids" { value = module.identity.client_ids }
