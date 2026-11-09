@@ -10,6 +10,7 @@
  */
 import { createPool, fabricSqlConfigFromEnv, FabricSqlPersistence } from "@coa/persistence";
 import { createServiceBusIngestionQueue } from "@coa/messaging";
+import { createFabricLakehouseReader, type MasterDataReader } from "@coa/fabric-read";
 import { createAzureBlobStore } from "./storage/azure-blob-store.js";
 import { createAzureDocumentIntelligenceClient } from "./extraction/index.js";
 import { createAzureFoundryClient } from "./interpretation/index.js";
@@ -30,10 +31,14 @@ async function main(): Promise<void> {
   const di = createAzureDocumentIntelligenceClient({ resolveBytes: (ref) => blob.download(ref) });
   const foundry = createAzureFoundryClient();
 
-  // NOTE: customer/item master matching + the duplicate claim are wired in the pipeline but need
-  // the real Fabric read adapter (Q-FAB-1), which is not built yet — so `masters` is omitted and
-  // matching is deferred (orders land with CUSTOMER_MATCH_DEFERRED) until that adapter exists.
-  const pipeline: PipelineDeps = { blob, persistence, di, foundry };
+  // Master matching + the atomic duplicate claim turn on when the Fabric Lakehouse masters are
+  // configured (LAKEHOUSE_SQL_SERVER). Without it, matching is deferred (CUSTOMER_MATCH_DEFERRED).
+  let masters: MasterDataReader | undefined;
+  if (process.env.LAKEHOUSE_SQL_SERVER) {
+    masters = await createFabricLakehouseReader();
+    console.log("[worker] Fabric Lakehouse masters wired — matching + duplicate claim enabled");
+  }
+  const pipeline: PipelineDeps = { blob, persistence, di, foundry, ...(masters ? { masters } : {}) };
 
   const worker = new IngestionWorker({ client: createDefaultGraphApiClient(), mailbox, pipeline });
   const queue = createServiceBusIngestionQueue();
