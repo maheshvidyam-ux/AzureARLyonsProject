@@ -5,6 +5,9 @@
  */
 import { randomUUID } from "node:crypto";
 import type {
+  ClaimDuplicateInput,
+  DuplicateChannel,
+  DuplicateClaimResult,
   IngestionInput,
   IngestionResult,
   MailMessageRow,
@@ -15,6 +18,7 @@ import type {
   RecordDocumentResult,
   SaveProcessedOrderInput,
   SaveProcessedOrderResult,
+  SeedExternalClaimInput,
   ValidationRow,
 } from "../ports.js";
 
@@ -50,6 +54,8 @@ export class InMemoryPersistence implements Persistence {
   private readonly extractedByDocId = new Map<string, ExtractedOrder>();
   private readonly headerByExtractedId = new Map<string, OrderHeader>();
   private readonly validationByHeaderId = new Map<string, ValidationRow[]>();
+  /** active duplicate claims keyed by business_key (CLAIMED/RESOLVED) */
+  private readonly activeClaims = new Map<string, { channel: DuplicateChannel; ref: string | null; orderHeaderId: string | null; claimId: string }>();
 
   async ingest(input: IngestionInput): Promise<IngestionResult> {
     let message = this.mailByGraphId.get(input.graphMessageId);
@@ -131,6 +137,52 @@ export class InMemoryPersistence implements Persistence {
     );
 
     return { extractedOrderId: extracted.id, orderHeaderId: header.id, created: true };
+  }
+
+  async claimDuplicate(input: ClaimDuplicateInput): Promise<DuplicateClaimResult> {
+    // Single-threaded check-then-set is atomic here; the Fabric SQL impl relies on the
+    // filtered unique index for the same guarantee under real concurrency.
+    const existing = this.activeClaims.get(input.businessKey);
+    if (existing) {
+      // Re-claim by the same order is idempotent (not a duplicate).
+      if (existing.orderHeaderId && existing.orderHeaderId === input.orderHeaderId) {
+        return { status: "CLAIMED", claimId: existing.claimId };
+      }
+      return { status: "COLLISION", matchedChannel: existing.channel, matchedExistingRef: existing.ref };
+    }
+    const claimId = randomUUID();
+    this.activeClaims.set(input.businessKey, {
+      channel: input.channel,
+      ref: input.matchedExistingRef ?? input.orderHeaderId,
+      orderHeaderId: input.orderHeaderId,
+      claimId,
+    });
+    return { status: "CLAIMED", claimId };
+  }
+
+  async seedExternalClaim(input: SeedExternalClaimInput): Promise<void> {
+    this.activeClaims.set(input.businessKey, {
+      channel: input.channel,
+      ref: input.matchedExistingRef ?? null,
+      orderHeaderId: null,
+      claimId: randomUUID(),
+    });
+  }
+
+  async markDuplicateReview(orderHeaderId: string, detail: string): Promise<void> {
+    const header = this.findHeader(orderHeaderId);
+    if (!header) return;
+    header.internalState = "DUPLICATE_REVIEW";
+    header.simpleStatus = "Needs Review";
+    const findings = this.validationByHeaderId.get(orderHeaderId) ?? [];
+    findings.push({ code: "DUPLICATE_DETECTED", severity: "ERROR", blocking: true, fieldPath: null });
+    this.validationByHeaderId.set(orderHeaderId, findings);
+    void detail;
+  }
+
+  private findHeader(id: string): OrderHeader | undefined {
+    for (const h of this.headerByExtractedId.values()) if (h.id === id) return h;
+    return undefined;
   }
 
   async getOrderHeaderById(id: string): Promise<OrderHeaderRow | null> {

@@ -111,18 +111,31 @@ describe("InMemoryPersistence idempotency", () => {
 const hasDb = Boolean(process.env.FABRIC_SQL_SERVER && process.env.FABRIC_SQL_DATABASE);
 
 describe.skipIf(!hasDb)("FabricSqlPersistence (live)", () => {
-  it("migrates, persists an order, reads it back, and the duplicate-claim index exists", async () => {
+  it("migrates, persists an order, reads it back, and enforces the atomic duplicate claim", async () => {
     const { createPool, fabricSqlConfigFromEnv, migrateUp, migrateDown, FabricSqlPersistence } = await import("./src/index.js");
     const pool = await createPool(fabricSqlConfigFromEnv());
     const p = new FabricSqlPersistence(pool);
     try {
-      await migrateUp(pool);
+      await migrateUp(pool); // applies 0001 + 0002 (external claims)
       const ing = await p.ingest(ingestionInput());
       expect(ing.created).toBe(true);
       const doc = await p.recordDocument({ mailAttachmentId: ing.mailAttachmentId, companyId: "USMF", blobUriOriginal: "mock://x", diModelVersion: "test" });
       const saved = await p.saveProcessedOrder(saveInput(doc.sourceDocumentId));
       const header = await p.getOrderHeaderById(saved.orderHeaderId);
       expect(header?.normalizedPoNumber).toBe("PO1");
+
+      // Atomic duplicate claim against the real filtered unique index:
+      // cross-channel — a pre-registered EDI claim blocks the Email order.
+      const KEY = "USMF::ACME01::LIVEKEY1";
+      await p.seedExternalClaim({ companyId: "USMF", businessKey: KEY, channel: "EDI", matchedExistingRef: "EDI-1" });
+      const collision = await p.claimDuplicate({ companyId: "USMF", businessKey: KEY, orderHeaderId: saved.orderHeaderId, channel: "EMAIL" });
+      expect(collision.status).toBe("COLLISION");
+      if (collision.status === "COLLISION") expect(collision.matchedChannel).toBe("EDI");
+
+      // Fresh key — claim is idempotent for the same order (no self-collision).
+      const KEY2 = "USMF::ACME01::LIVEKEY2";
+      expect((await p.claimDuplicate({ companyId: "USMF", businessKey: KEY2, orderHeaderId: saved.orderHeaderId, channel: "EMAIL" })).status).toBe("CLAIMED");
+      expect((await p.claimDuplicate({ companyId: "USMF", businessKey: KEY2, orderHeaderId: saved.orderHeaderId, channel: "EMAIL" })).status).toBe("CLAIMED");
     } finally {
       await migrateDown(pool);
       await p.close();

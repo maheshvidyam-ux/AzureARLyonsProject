@@ -9,6 +9,9 @@
  */
 import sql from "mssql";
 import type {
+  ClaimDuplicateInput,
+  DuplicateChannel,
+  DuplicateClaimResult,
   IngestionInput,
   IngestionResult,
   MailMessageRow,
@@ -19,6 +22,7 @@ import type {
   RecordDocumentResult,
   SaveProcessedOrderInput,
   SaveProcessedOrderResult,
+  SeedExternalClaimInput,
   ValidationRow,
 } from "../ports.js";
 
@@ -221,6 +225,86 @@ export class FabricSqlPersistence implements Persistence {
     }
   }
 
+  async claimDuplicate(input: ClaimDuplicateInput): Promise<DuplicateClaimResult> {
+    try {
+      const res = await this.pool
+        .request()
+        .input("company", sql.VarChar(20), input.companyId)
+        .input("bk", sql.VarChar(220), input.businessKey)
+        .input("oh", sql.UniqueIdentifier, input.orderHeaderId)
+        .input("ref", sql.VarChar(100), input.matchedExistingRef ?? null)
+        .input("chan", sql.VarChar(10), input.channel)
+        .query(
+          `INSERT INTO dbo.duplicate_claim (company_id, business_key, order_header_id, status, matched_existing_ref, matched_channel)
+           OUTPUT INSERTED.id
+           VALUES (@company, @bk, @oh, 'CLAIMED', @ref, @chan)`,
+        );
+      return { status: "CLAIMED", claimId: res.recordset[0].id };
+    } catch (e) {
+      if (!isUniqueViolation(e)) throw e;
+      // Lost the race / key already held — read the winning claim for cross-channel context.
+      const existing = await this.pool
+        .request()
+        .input("bk", sql.VarChar(220), input.businessKey)
+        .query(
+          `SELECT TOP 1 id, order_header_id, matched_channel, matched_existing_ref
+           FROM dbo.duplicate_claim WHERE business_key = @bk AND status IN ('CLAIMED','RESOLVED')`,
+        );
+      const r = existing.recordset[0];
+      // Re-claim by the same order is idempotent (not a duplicate).
+      if (r && String(r.order_header_id).toLowerCase() === input.orderHeaderId.toLowerCase()) {
+        return { status: "CLAIMED", claimId: r.id };
+      }
+      return {
+        status: "COLLISION",
+        matchedChannel: (r?.matched_channel ?? null) as DuplicateChannel | null,
+        matchedExistingRef: r?.matched_existing_ref ?? null,
+      };
+    }
+  }
+
+  async seedExternalClaim(input: SeedExternalClaimInput): Promise<void> {
+    await this.pool
+      .request()
+      .input("company", sql.VarChar(20), input.companyId)
+      .input("bk", sql.VarChar(220), input.businessKey)
+      .input("ref", sql.VarChar(100), input.matchedExistingRef ?? null)
+      .input("chan", sql.VarChar(10), input.channel)
+      .query(
+        `INSERT INTO dbo.duplicate_claim (company_id, business_key, order_header_id, status, matched_existing_ref, matched_channel)
+         VALUES (@company, @bk, NULL, 'CLAIMED', @ref, @chan)`,
+      );
+  }
+
+  async markDuplicateReview(orderHeaderId: string, detail: string): Promise<void> {
+    const tx = new sql.Transaction(this.pool);
+    await tx.begin();
+    try {
+      await new sql.Request(tx)
+        .input("id", sql.UniqueIdentifier, orderHeaderId)
+        .query(
+          `UPDATE dbo.order_header SET internal_state = 'DUPLICATE_REVIEW', simple_status = 'Needs Review', updated_at = SYSUTCDATETIME() WHERE id = @id`,
+        );
+      await new sql.Request(tx)
+        .input("id", sql.UniqueIdentifier, orderHeaderId)
+        .input("msg", sql.NVarChar(2000), detail)
+        .query(
+          `INSERT INTO dbo.order_validation (order_header_id, severity, code, field_path, message, blocking)
+           VALUES (@id, 'ERROR', 'DUPLICATE_DETECTED', NULL, @msg, 1)`,
+        );
+      await new sql.Request(tx)
+        .input("id", sql.UniqueIdentifier, orderHeaderId)
+        .query(
+          `INSERT INTO dbo.order_status_history (order_header_id, from_state, to_state, actor, reason)
+           VALUES (@id, 'READY', 'DUPLICATE_REVIEW', 'system', 'duplicate business key')`,
+        );
+      await tx.commit();
+    } catch (e) {
+      await safeRollback(tx);
+      throw e;
+    }
+  }
+
   async getOrderHeaderById(id: string): Promise<OrderHeaderRow | null> {
     const res = await this.pool
       .request()
@@ -303,6 +387,12 @@ async function getOrCreateIdTracked(
   if (found.recordset.length > 0) return { id: found.recordset[0].id, created: false };
   const inserted = await bindInsert(new sql.Request(tx)).query(insertSql);
   return { id: inserted.recordset[0].id, created: true };
+}
+
+/** SQL Server unique-constraint / unique-index violation error numbers. */
+function isUniqueViolation(e: unknown): boolean {
+  const n = (e as { number?: number }).number;
+  return n === 2601 || n === 2627;
 }
 
 async function safeRollback(tx: sql.Transaction): Promise<void> {

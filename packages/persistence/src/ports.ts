@@ -134,11 +134,42 @@ export interface MailMessageRow {
   failureReason: string | null;
 }
 
+// --- duplicate claim (spec §8, invariant #2) ---
+export type DuplicateChannel = "EMAIL" | "EDI" | "AX";
+
+export interface ClaimDuplicateInput {
+  companyId: string;
+  /** normalized_po_number :: erp_customer_account :: company_id */
+  businessKey: string;
+  orderHeaderId: string;
+  channel: DuplicateChannel;
+  matchedExistingRef?: string | null;
+}
+
+export type DuplicateClaimResult =
+  | { status: "CLAIMED"; claimId: string }
+  | { status: "COLLISION"; matchedChannel: DuplicateChannel | null; matchedExistingRef: string | null };
+
+/** Register an external (EDI/AX) claim with no local order — for cross-channel coordination/tests. */
+export interface SeedExternalClaimInput {
+  companyId: string;
+  businessKey: string;
+  channel: DuplicateChannel;
+  matchedExistingRef?: string | null;
+}
+
 export interface Persistence {
   ingest(input: IngestionInput): Promise<IngestionResult>;
   recordDocument(input: RecordDocumentInput): Promise<RecordDocumentResult>;
   markFailed(input: MarkFailedInput): Promise<void>;
   saveProcessedOrder(input: SaveProcessedOrderInput): Promise<SaveProcessedOrderResult>;
+
+  /** Atomically reserve the duplicate business key. Exactly one concurrent caller gets CLAIMED. */
+  claimDuplicate(input: ClaimDuplicateInput): Promise<DuplicateClaimResult>;
+  /** Pre-register an EDI/AX claim (cross-channel). */
+  seedExternalClaim(input: SeedExternalClaimInput): Promise<void>;
+  /** Route an order to DUPLICATE_REVIEW: set state + add a blocking finding + status history. */
+  markDuplicateReview(orderHeaderId: string, detail: string): Promise<void>;
 
   getOrderHeaderById(id: string): Promise<OrderHeaderRow | null>;
   getValidationByOrderId(orderHeaderId: string): Promise<ValidationRow[]>;

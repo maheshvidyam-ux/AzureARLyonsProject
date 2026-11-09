@@ -20,7 +20,9 @@
       "@coa/po-schema": ["packages/po-schema/src/index.ts"],
       "@coa/domain": ["packages/domain/src/index.ts"],
       "@coa/persistence": ["packages/persistence/src/index.ts"],
-      "@coa/messaging": ["packages/messaging/src/index.ts"]
+      "@coa/messaging": ["packages/messaging/src/index.ts"],
+      "@coa/fabric-read": ["packages/fabric-read/src/index.ts"],
+      "@coa/matching": ["packages/matching/src/index.ts"]
     }
   }
 }

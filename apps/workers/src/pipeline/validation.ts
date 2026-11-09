@@ -30,10 +30,8 @@ export function validateStructural(po: NormalizedPurchaseOrder): ValidationFindi
     findings.push(err("CURRENCY_FORMAT_INVALID", "header.currency", `Currency '${currency}' is not a 3-letter ISO 4217 code.`));
   }
 
-  // Phase-3 master matching not yet run: surface unmatched customer as informational only.
-  if (po.header.customer && po.header.customer.erp_customer_account?.value == null) {
-    findings.push(warn("CUSTOMER_MATCH_DEFERRED", "header.customer.erp_customer_account", "Customer not matched to an ERP account (master matching is Phase 3)."));
-  }
+  // Note: customer/item master matching is handled by the pipeline's matching step (Phase 3),
+  // not here — this function covers structural/arithmetic checks only.
 
   // --- lines ---
   if (po.lines.length === 0) {
