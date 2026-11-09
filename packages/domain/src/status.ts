@@ -64,3 +64,15 @@ export const PRE_STAGING_TERMINAL_STATES = [
   "DUPLICATE_REVIEW",
   "FAILED",
 ] as const satisfies readonly InternalState[];
+
+/**
+ * States the pipeline may reach once staging is enabled (Phase 5). STAGED means the order was
+ * published to the Boomi "final tables"; ERP states are only set by the Boomi ack path.
+ */
+export const PIPELINE_TERMINAL_STATES = [
+  "READY",
+  "STAGED",
+  "NEEDS_REVIEW",
+  "DUPLICATE_REVIEW",
+  "FAILED",
+] as const satisfies readonly InternalState[];

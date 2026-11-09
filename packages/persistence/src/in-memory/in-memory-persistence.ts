@@ -26,6 +26,8 @@ import type {
   SaveProcessedOrderInput,
   SaveProcessedOrderResult,
   SeedExternalClaimInput,
+  StageOrderResult,
+  StagedOrderRow,
   UpdateOrderInput,
   ValidationRow,
 } from "../ports.js";
@@ -57,12 +59,17 @@ interface OrderHeader extends OrderHeaderRow {
   sourceChannel: string;
   customerPoNumber: string | null;
   poDate: string | null;
+  requestedDeliveryDate: string | null;
   shipTo: string | null;
   billTo: string | null;
   currency: string | null;
   rowVersion: number;
   lines: StoredLine[];
   normalizedJson: string;
+}
+
+interface StagingRecord extends StagedOrderRow {
+  lines: Array<{ lineNo: number | null; erpItemId: string | null; customerItemCode: string | null; quantity: number | null; uom: string | null; unitPrice: number | null }>;
 }
 
 export class InMemoryPersistence implements Persistence {
@@ -74,6 +81,8 @@ export class InMemoryPersistence implements Persistence {
   private readonly validationByHeaderId = new Map<string, ValidationRow[]>();
   /** active duplicate claims keyed by business_key (CLAIMED/RESOLVED) */
   private readonly activeClaims = new Map<string, { channel: DuplicateChannel; ref: string | null; orderHeaderId: string | null; claimId: string }>();
+  /** Boomi staging records keyed by orderHeaderId (one per order). */
+  private readonly stagingByOrder = new Map<string, StagingRecord>();
 
   async ingest(input: IngestionInput): Promise<IngestionResult> {
     let message = this.mailByGraphId.get(input.graphMessageId);
@@ -151,6 +160,7 @@ export class InMemoryPersistence implements Persistence {
       sourceChannel: input.header.sourceChannel,
       customerPoNumber: input.header.customerPoNumber,
       poDate: input.header.poDate,
+      requestedDeliveryDate: input.header.requestedDeliveryDate,
       shipTo: input.header.shipTo,
       billTo: input.header.billTo,
       currency: input.header.currency,
@@ -309,14 +319,65 @@ export class InMemoryPersistence implements Persistence {
     if (!h) return { status: "NOT_FOUND" };
     if (h.rowVersion !== expectedRowVersion) return { status: "CONFLICT", rowVersion: h.rowVersion };
     if (decision === "APPROVE") {
-      h.internalState = "READY";
-      h.simpleStatus = "Ready";
+      await this.stageOrder(orderHeaderId); // → STAGED, written to the Boomi staging tables
     } else {
       h.internalState = "REJECTED";
       h.simpleStatus = "Rejected";
     }
     h.rowVersion += 1;
     return { status: "OK", rowVersion: h.rowVersion };
+  }
+
+  async stageOrder(orderHeaderId: string): Promise<StageOrderResult> {
+    const h = this.findHeader(orderHeaderId);
+    if (!h) throw new Error(`Cannot stage unknown order ${orderHeaderId}`);
+    const existing = this.stagingByOrder.get(orderHeaderId);
+    if (existing) {
+      h.internalState = "STAGED";
+      h.simpleStatus = "Ready";
+      return { stagingId: existing.stagingId, created: false };
+    }
+    const stagingId = randomUUID();
+    this.stagingByOrder.set(orderHeaderId, {
+      stagingId,
+      orderHeaderId,
+      dataAreaId: h.companyId,
+      erpCustomerAccount: h.erpCustomerAccount,
+      customerPoNumber: h.customerPoNumber,
+      normalizedPoNumber: h.normalizedPoNumber,
+      poDate: h.poDate,
+      requestedDeliveryDate: h.requestedDeliveryDate,
+      currency: h.currency,
+      total: h.total,
+      lineCount: h.lineCount,
+      publishStatus: "READY",
+      axSalesOrderId: null,
+      lines: h.lines.map((l, i) => ({ lineNo: l.sourceLineNo ?? i + 1, erpItemId: l.erpItemId, customerItemCode: l.customerItemCode, quantity: l.quantity, uom: l.uom, unitPrice: l.unitPrice })),
+    });
+    h.internalState = "STAGED";
+    h.simpleStatus = "Ready";
+    return { stagingId, created: true };
+  }
+
+  async listReadyForBoomi(limit = 100): Promise<StagedOrderRow[]> {
+    return [...this.stagingByOrder.values()]
+      .filter((r) => r.publishStatus === "READY")
+      .slice(0, limit)
+      .map(({ lines: _lines, ...row }) => row);
+  }
+
+  async markBoomiResult(stagingId: string, result: { axSalesOrderId?: string; error?: string }): Promise<void> {
+    for (const rec of this.stagingByOrder.values()) {
+      if (rec.stagingId !== stagingId) continue;
+      rec.publishStatus = result.error ? "FAILED" : "COMPLETED";
+      rec.axSalesOrderId = result.axSalesOrderId ?? null;
+      const h = this.findHeader(rec.orderHeaderId);
+      if (h && !result.error) {
+        h.internalState = "ERP_CREATED";
+        h.simpleStatus = "Completed";
+      }
+      return;
+    }
   }
 
   async getOrderHeaderById(id: string): Promise<OrderHeaderRow | null> {

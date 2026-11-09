@@ -87,12 +87,14 @@ describe("reviewer API", () => {
     expect(stale.json().rowVersion).toBe(1);
   });
 
-  it("approves an order (NEEDS_REVIEW → Ready)", async () => {
+  it("approves an order → staged for Boomi (STAGED, Ready for pickup)", async () => {
     const res = await app.inject({ method: "POST", url: `/orders/${orderId}/approve`, headers: { ...PROC, "if-match": "0" } });
     expect(res.statusCode).toBe(200);
     const detail = await app.inject({ method: "GET", url: `/orders/${orderId}`, headers: VIEWER });
-    expect(detail.json().header.internalState).toBe("READY");
+    expect(detail.json().header.internalState).toBe("STAGED");
     expect(detail.json().header.simpleStatus).toBe("Ready");
+    // it now appears in the Boomi pickup queue
+    expect((await persistence.listReadyForBoomi()).some((o) => o.orderHeaderId === orderId)).toBe(true);
   });
 
   it("rejects an order and 404s on an unknown id", async () => {

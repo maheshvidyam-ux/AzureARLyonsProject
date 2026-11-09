@@ -10,7 +10,7 @@
  * NEEDS_REVIEW / FAILED, all strictly pre-staging.
  */
 import {
-  PRE_STAGING_TERMINAL_STATES,
+  PIPELINE_TERMINAL_STATES,
   duplicateBusinessKey,
   resolveCompanyId,
   toSimpleStatus,
@@ -68,6 +68,11 @@ export interface PipelineDeps {
    * and attempts the atomic duplicate claim. When omitted, matching is deferred (back-compat).
    */
   masters?: MasterDataReader;
+  /**
+   * Phase 5: when true, a clean + matched + claimed order (READY) is auto-staged to the Boomi
+   * "final tables" (→ STAGED, Ready for Boomi). Default off — everything else awaits CSR approval.
+   */
+  autoStage?: boolean;
 }
 
 export async function processAttachment(
@@ -251,6 +256,14 @@ export async function processAttachment(
     }
   }
 
+  // 9. Straight-through staging (Phase 5): a clean, matched, claimed order goes to the Boomi
+  // "final tables" and becomes Ready for Boomi. Anything in review is staged only on CSR approval.
+  if (state === "READY" && deps.autoStage) {
+    const staged = await deps.persistence.stageOrder(saved.orderHeaderId);
+    state = "STAGED";
+    trace.push(`STAGED for Boomi (staging ${staged.stagingId.slice(0, 8)}) — Ready for pickup`);
+  }
+
   const res = result(companyId, documentId, saved.orderHeaderId, ingestion, state, norm.po, findings, trace, decision);
   res.duplicateBusinessKey = businessKey;
   return res;
@@ -283,9 +296,10 @@ function result(
   trace: string[],
   decision: SliceDecision = state === "FAILED" ? "FAILED" : "NEEDS_REVIEW",
 ): SliceResult {
-  // Guardrail: the slice must never advance past a pre-staging state.
-  if (!(PRE_STAGING_TERMINAL_STATES as readonly InternalState[]).includes(state)) {
-    throw new Error(`Guardrail violation: slice reached post-staging state '${state}'`);
+  // Guardrail: the pipeline may reach STAGED (Phase 5) but never a post-staging ERP state —
+  // those belong to the Boomi/ack path, not this worker.
+  if (!(PIPELINE_TERMINAL_STATES as readonly InternalState[]).includes(state)) {
+    throw new Error(`Guardrail violation: pipeline reached forbidden state '${state}'`);
   }
   return {
     companyId,

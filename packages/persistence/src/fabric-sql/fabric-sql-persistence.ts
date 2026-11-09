@@ -28,6 +28,8 @@ import type {
   SaveProcessedOrderInput,
   SaveProcessedOrderResult,
   SeedExternalClaimInput,
+  StageOrderResult,
+  StagedOrderRow,
   UpdateOrderInput,
   ValidationRow,
 } from "../ports.js";
@@ -456,16 +458,15 @@ export class FabricSqlPersistence implements Persistence {
     if (!current) return { status: "NOT_FOUND" };
     if (current.header.rowVersion !== expectedRowVersion) return { status: "CONFLICT", rowVersion: current.header.rowVersion };
 
-    const internal = decision === "APPROVE" ? "READY" : "REJECTED";
-    const simple = decision === "APPROVE" ? "Ready" : "Rejected";
     const tx = new sql.Transaction(this.pool);
     await tx.begin();
     try {
+      // Optimistic bump (state set below / via staging).
       const upd = await new sql.Request(tx)
         .input("id", sql.UniqueIdentifier, orderHeaderId)
         .input("exp", sql.Int, expectedRowVersion)
-        .input("s", sql.VarChar(20), internal)
-        .input("ss", sql.VarChar(20), simple)
+        .input("s", sql.VarChar(20), decision === "REJECT" ? "REJECTED" : current.header.internalState)
+        .input("ss", sql.VarChar(20), decision === "REJECT" ? "Rejected" : current.header.simpleStatus)
         .query(
           `UPDATE dbo.order_header SET internal_state=@s, simple_status=@ss, row_version = row_version + 1, updated_at = SYSUTCDATETIME()
            WHERE id=@id AND row_version=@exp`,
@@ -474,18 +475,125 @@ export class FabricSqlPersistence implements Persistence {
         await safeRollback(tx);
         return { status: "CONFLICT", rowVersion: current.header.rowVersion };
       }
-      await new sql.Request(tx)
-        .input("id", sql.UniqueIdentifier, orderHeaderId)
-        .input("from", sql.VarChar(20), current.header.internalState)
-        .input("to", sql.VarChar(20), internal)
-        .input("actor", sql.VarChar(40), actor)
-        .query(
-          `INSERT INTO dbo.order_status_history (order_header_id, from_state, to_state, actor, reason)
-           VALUES (@id, @from, @to, @actor, 'reviewer decision')`,
-        );
+      if (decision === "REJECT") {
+        await new sql.Request(tx)
+          .input("id", sql.UniqueIdentifier, orderHeaderId)
+          .input("from", sql.VarChar(20), current.header.internalState)
+          .input("actor", sql.VarChar(40), actor)
+          .query(`INSERT INTO dbo.order_status_history (order_header_id, from_state, to_state, actor, reason) VALUES (@id, @from, 'REJECTED', @actor, 'reviewer decision')`);
+      }
       await insertAudit(tx, current.header.companyId, actor, decision === "APPROVE" ? "ORDER_APPROVE" : "ORDER_REJECT", orderHeaderId, null);
       await tx.commit();
-      return { status: "OK", rowVersion: expectedRowVersion + 1 };
+    } catch (e) {
+      await safeRollback(tx);
+      throw e;
+    }
+    // Approve stages the order to the Boomi "final tables" (→ STAGED).
+    if (decision === "APPROVE") await this.stageOrder(orderHeaderId);
+    return { status: "OK", rowVersion: expectedRowVersion + 1 };
+  }
+
+  async stageOrder(orderHeaderId: string): Promise<StageOrderResult> {
+    const tx = new sql.Transaction(this.pool);
+    await tx.begin();
+    try {
+      const ex = await new sql.Request(tx).input("id", sql.UniqueIdentifier, orderHeaderId).query("SELECT id FROM dbo.staging_sales_order WHERE order_header_id = @id");
+      if (ex.recordset.length > 0) {
+        await new sql.Request(tx).input("id", sql.UniqueIdentifier, orderHeaderId).query("UPDATE dbo.order_header SET internal_state='STAGED', simple_status='Ready', updated_at=SYSUTCDATETIME() WHERE id=@id");
+        await tx.commit();
+        return { stagingId: ex.recordset[0].id, created: false };
+      }
+      const h = (await new sql.Request(tx).input("id", sql.UniqueIdentifier, orderHeaderId).query(
+        `SELECT company_id, erp_customer_account, customer_po_number, normalized_po_number, po_date, requested_delivery_date, currency, total, line_count
+         FROM dbo.order_header WHERE id=@id`,
+      )).recordset[0];
+      if (!h) {
+        await safeRollback(tx);
+        throw new Error(`Cannot stage unknown order ${orderHeaderId}`);
+      }
+      const stagingId = (await new sql.Request(tx)
+        .input("oh", sql.UniqueIdentifier, orderHeaderId)
+        .input("dax", sql.VarChar(20), h.company_id)
+        .input("acct", sql.VarChar(50), h.erp_customer_account)
+        .input("po", sql.VarChar(100), h.customer_po_number)
+        .input("npo", sql.VarChar(100), h.normalized_po_number)
+        .input("podate", sql.Date, h.po_date)
+        .input("reqdate", sql.Date, h.requested_delivery_date)
+        .input("cur", sql.Char(3), h.currency)
+        .input("total", sql.Decimal(18, 4), h.total)
+        .input("lc", sql.Int, h.line_count)
+        .query(
+          `INSERT INTO dbo.staging_sales_order (order_header_id, data_area_id, erp_customer_account, customer_po_number, normalized_po_number, po_date, requested_delivery_date, currency, total, line_count, publish_status)
+           OUTPUT INSERTED.id VALUES (@oh,@dax,@acct,@po,@npo,@podate,@reqdate,@cur,@total,@lc,'READY')`,
+        )).recordset[0].id;
+
+      const lines = await new sql.Request(tx).input("id", sql.UniqueIdentifier, orderHeaderId).query(
+        `SELECT source_line_no, erp_item_id, customer_item_code, quantity, uom, unit_price, requested_date FROM dbo.order_line WHERE order_header_id=@id ORDER BY source_line_no`,
+      );
+      for (const l of lines.recordset) {
+        await new sql.Request(tx)
+          .input("sid", sql.UniqueIdentifier, stagingId)
+          .input("ln", sql.Int, l.source_line_no)
+          .input("item", sql.VarChar(50), l.erp_item_id)
+          .input("code", sql.VarChar(100), l.customer_item_code)
+          .input("qty", sql.Decimal(18, 4), l.quantity)
+          .input("uom", sql.VarChar(20), l.uom)
+          .input("price", sql.Decimal(18, 4), l.unit_price)
+          .input("rd", sql.Date, l.requested_date)
+          .query(`INSERT INTO dbo.staging_sales_order_line (staging_order_id, line_no, erp_item_id, customer_item_code, quantity, uom, unit_price, requested_date) VALUES (@sid,@ln,@item,@code,@qty,@uom,@price,@rd)`);
+      }
+      await new sql.Request(tx).input("id", sql.UniqueIdentifier, orderHeaderId).query("UPDATE dbo.order_header SET internal_state='STAGED', simple_status='Ready', updated_at=SYSUTCDATETIME() WHERE id=@id");
+      await new sql.Request(tx).input("id", sql.UniqueIdentifier, orderHeaderId).query("INSERT INTO dbo.order_status_history (order_header_id, from_state, to_state, actor, reason) VALUES (@id,'READY','STAGED','system','staged for Boomi')");
+      await tx.commit();
+      return { stagingId, created: true };
+    } catch (e) {
+      await safeRollback(tx);
+      throw e;
+    }
+  }
+
+  async listReadyForBoomi(limit = 100): Promise<StagedOrderRow[]> {
+    const top = Math.max(1, Math.min(limit, 500));
+    const res = await this.pool.request().query(
+      `SELECT TOP (${top}) id, order_header_id, data_area_id, erp_customer_account, customer_po_number, normalized_po_number,
+              po_date, requested_delivery_date, currency, total, line_count, publish_status, ax_sales_order_id
+       FROM dbo.staging_sales_order WHERE publish_status = 'READY' ORDER BY created_at`,
+    );
+    return res.recordset.map((r) => ({
+      stagingId: r.id,
+      orderHeaderId: r.order_header_id,
+      dataAreaId: r.data_area_id,
+      erpCustomerAccount: r.erp_customer_account,
+      customerPoNumber: r.customer_po_number,
+      normalizedPoNumber: r.normalized_po_number,
+      poDate: r.po_date ? toDateString(r.po_date) : null,
+      requestedDeliveryDate: r.requested_delivery_date ? toDateString(r.requested_delivery_date) : null,
+      currency: r.currency,
+      total: r.total,
+      lineCount: r.line_count,
+      publishStatus: r.publish_status,
+      axSalesOrderId: r.ax_sales_order_id,
+    }));
+  }
+
+  async markBoomiResult(stagingId: string, result: { axSalesOrderId?: string; error?: string }): Promise<void> {
+    const tx = new sql.Transaction(this.pool);
+    await tx.begin();
+    try {
+      await new sql.Request(tx)
+        .input("id", sql.UniqueIdentifier, stagingId)
+        .input("st", sql.VarChar(20), result.error ? "FAILED" : "COMPLETED")
+        .input("ax", sql.VarChar(60), result.axSalesOrderId ?? null)
+        .input("err", sql.NVarChar(2000), result.error ?? null)
+        .query(`UPDATE dbo.staging_sales_order SET publish_status=@st, ax_sales_order_id=@ax, error_message=@err, updated_at=SYSUTCDATETIME() WHERE id=@id`);
+      if (!result.error) {
+        const oh = (await new sql.Request(tx).input("id", sql.UniqueIdentifier, stagingId).query("SELECT order_header_id FROM dbo.staging_sales_order WHERE id=@id")).recordset[0];
+        if (oh) {
+          await new sql.Request(tx).input("id", sql.UniqueIdentifier, oh.order_header_id).query("UPDATE dbo.order_header SET internal_state='ERP_CREATED', simple_status='Completed', updated_at=SYSUTCDATETIME() WHERE id=@id");
+          await new sql.Request(tx).input("id", sql.UniqueIdentifier, oh.order_header_id).input("ax", sql.VarChar(60), result.axSalesOrderId ?? null).query("INSERT INTO dbo.integration_ack (order_header_id, boomi_status, ax_sales_order_id) VALUES (@id,'COMPLETED',@ax)");
+        }
+      }
+      await tx.commit();
     } catch (e) {
       await safeRollback(tx);
       throw e;

@@ -38,7 +38,8 @@ async function main(): Promise<void> {
     masters = await createFabricLakehouseReader();
     console.log("[worker] Fabric Lakehouse masters wired — matching + duplicate claim enabled");
   }
-  const pipeline: PipelineDeps = { blob, persistence, di, foundry, ...(masters ? { masters } : {}) };
+  // With masters wired, straight-through orders auto-stage to the Boomi tables (Ready for pickup).
+  const pipeline: PipelineDeps = { blob, persistence, di, foundry, ...(masters ? { masters, autoStage: true } : {}) };
 
   const worker = new IngestionWorker({ client: createDefaultGraphApiClient(), mailbox, pipeline });
   const queue = createServiceBusIngestionQueue();

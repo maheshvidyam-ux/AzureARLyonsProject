@@ -243,6 +243,28 @@ export type OptimisticResult =
 
 export type ReviewDecisionKind = "APPROVE" | "REJECT";
 
+// --- Boomi staging ("final tables"; spec §8/§5, ADR 0003/0004) ---
+export interface StageOrderResult {
+  stagingId: string;
+  /** false => already staged (idempotent). */
+  created: boolean;
+}
+export interface StagedOrderRow {
+  stagingId: string;
+  orderHeaderId: string;
+  dataAreaId: string;
+  erpCustomerAccount: string | null;
+  customerPoNumber: string | null;
+  normalizedPoNumber: string | null;
+  poDate: string | null;
+  requestedDeliveryDate: string | null;
+  currency: string | null;
+  total: number | null;
+  lineCount: number;
+  publishStatus: string;
+  axSalesOrderId: string | null;
+}
+
 export interface Persistence {
   ingest(input: IngestionInput): Promise<IngestionResult>;
   recordDocument(input: RecordDocumentInput): Promise<RecordDocumentResult>;
@@ -261,8 +283,19 @@ export interface Persistence {
   getOrderForReview(orderHeaderId: string): Promise<OrderReviewDetail | null>;
   /** Edit header/line fields with optimistic concurrency; bumps row_version. */
   updateOrderFields(orderHeaderId: string, expectedRowVersion: number, patch: UpdateOrderInput, actor: string): Promise<OptimisticResult>;
-  /** Approve (→ READY) or reject (→ REJECTED) with optimistic concurrency + audit. */
+  /**
+   * Approve or reject with optimistic concurrency + audit. APPROVE stages the order to the
+   * Boomi "final tables" (→ STAGED, publish_status READY); REJECT → REJECTED.
+   */
   reviewDecision(orderHeaderId: string, decision: ReviewDecisionKind, expectedRowVersion: number, actor: string): Promise<OptimisticResult>;
+
+  // --- Boomi staging ---
+  /** Publish an order to the Boomi staging tables (idempotent) and set it STAGED. */
+  stageOrder(orderHeaderId: string): Promise<StageOrderResult>;
+  /** Orders Boomi can pick up (publish_status = READY). */
+  listReadyForBoomi(limit?: number): Promise<StagedOrderRow[]>;
+  /** Boomi acknowledgment: record the AX sales order id (or a failure) and complete the order. */
+  markBoomiResult(stagingId: string, result: { axSalesOrderId?: string; error?: string }): Promise<void>;
 
   getOrderHeaderById(id: string): Promise<OrderHeaderRow | null>;
   getValidationByOrderId(orderHeaderId: string): Promise<ValidationRow[]>;
