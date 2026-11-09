@@ -158,6 +158,91 @@ export interface SeedExternalClaimInput {
   matchedExistingRef?: string | null;
 }
 
+// --- reviewer workbench (spec §13, §14) ---
+export interface OrderSummaryRow {
+  id: string;
+  companyId: string;
+  customerPoNumber: string | null;
+  normalizedPoNumber: string | null;
+  erpCustomerAccount: string | null;
+  simpleStatus: string;
+  internalState: string;
+  total: number | null;
+  lineCount: number;
+  rowVersion: number;
+}
+
+export interface OrderLineDetail {
+  lineId: string;
+  sourceLineNo: number | null;
+  customerItemCode: string | null;
+  erpItemId: string | null;
+  quantity: number | null;
+  uom: string | null;
+  unitPrice: number | null;
+  extendedAmount: number | null;
+}
+
+export interface OrderReviewHeader {
+  id: string;
+  companyId: string;
+  sourceChannel: string;
+  customerPoNumber: string | null;
+  normalizedPoNumber: string | null;
+  erpCustomerAccount: string | null;
+  poDate: string | null;
+  shipTo: string | null;
+  billTo: string | null;
+  currency: string | null;
+  total: number | null;
+  simpleStatus: string;
+  internalState: string;
+  rowVersion: number;
+}
+
+export interface OrderReviewDetail {
+  header: OrderReviewHeader;
+  lines: OrderLineDetail[];
+  validation: ValidationRow[];
+  /** normalized PO JSON (evidence/bounding boxes for the viewer); null if unavailable. */
+  normalized: unknown | null;
+}
+
+export interface ListOrdersFilter {
+  companyId?: string;
+  internalState?: string;
+  limit?: number;
+}
+
+export interface OrderHeaderPatch {
+  erpCustomerAccount?: string | null;
+  customerPoNumber?: string | null;
+  poDate?: string | null;
+  shipTo?: string | null;
+  billTo?: string | null;
+  currency?: string | null;
+  total?: number | null;
+}
+export interface OrderLinePatch {
+  lineId: string;
+  erpItemId?: string | null;
+  quantity?: number | null;
+  uom?: string | null;
+  unitPrice?: number | null;
+}
+export interface UpdateOrderInput {
+  header?: OrderHeaderPatch;
+  lines?: OrderLinePatch[];
+}
+
+/** Optimistic-concurrency result: CONFLICT means the caller's rowVersion was stale (spec §13). */
+export type OptimisticResult =
+  | { status: "OK"; rowVersion: number }
+  | { status: "CONFLICT"; rowVersion: number }
+  | { status: "NOT_FOUND" };
+
+export type ReviewDecisionKind = "APPROVE" | "REJECT";
+
 export interface Persistence {
   ingest(input: IngestionInput): Promise<IngestionResult>;
   recordDocument(input: RecordDocumentInput): Promise<RecordDocumentResult>;
@@ -170,6 +255,14 @@ export interface Persistence {
   seedExternalClaim(input: SeedExternalClaimInput): Promise<void>;
   /** Route an order to DUPLICATE_REVIEW: set state + add a blocking finding + status history. */
   markDuplicateReview(orderHeaderId: string, detail: string): Promise<void>;
+
+  // --- reviewer workbench ---
+  listOrders(filter: ListOrdersFilter): Promise<OrderSummaryRow[]>;
+  getOrderForReview(orderHeaderId: string): Promise<OrderReviewDetail | null>;
+  /** Edit header/line fields with optimistic concurrency; bumps row_version. */
+  updateOrderFields(orderHeaderId: string, expectedRowVersion: number, patch: UpdateOrderInput, actor: string): Promise<OptimisticResult>;
+  /** Approve (→ READY) or reject (→ REJECTED) with optimistic concurrency + audit. */
+  reviewDecision(orderHeaderId: string, decision: ReviewDecisionKind, expectedRowVersion: number, actor: string): Promise<OptimisticResult>;
 
   getOrderHeaderById(id: string): Promise<OrderHeaderRow | null>;
   getValidationByOrderId(orderHeaderId: string): Promise<ValidationRow[]>;

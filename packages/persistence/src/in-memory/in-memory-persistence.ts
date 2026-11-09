@@ -10,15 +10,23 @@ import type {
   DuplicateClaimResult,
   IngestionInput,
   IngestionResult,
+  ListOrdersFilter,
   MailMessageRow,
   MarkFailedInput,
+  OptimisticResult,
   OrderHeaderRow,
+  OrderLineDetail,
+  OrderLineWrite,
+  OrderReviewDetail,
+  OrderSummaryRow,
   Persistence,
   RecordDocumentInput,
   RecordDocumentResult,
+  ReviewDecisionKind,
   SaveProcessedOrderInput,
   SaveProcessedOrderResult,
   SeedExternalClaimInput,
+  UpdateOrderInput,
   ValidationRow,
 } from "../ports.js";
 
@@ -43,8 +51,18 @@ interface ExtractedOrder {
   id: string;
   sourceDocumentId: string;
 }
+type StoredLine = OrderLineDetail;
 interface OrderHeader extends OrderHeaderRow {
   extractedOrderId: string;
+  sourceChannel: string;
+  customerPoNumber: string | null;
+  poDate: string | null;
+  shipTo: string | null;
+  billTo: string | null;
+  currency: string | null;
+  rowVersion: number;
+  lines: StoredLine[];
+  normalizedJson: string;
 }
 
 export class InMemoryPersistence implements Persistence {
@@ -119,8 +137,9 @@ export class InMemoryPersistence implements Persistence {
       return { extractedOrderId: extracted.id, orderHeaderId: existingHeader.id, created: false };
     }
 
+    const headerId = randomUUID();
     const header: OrderHeader = {
-      id: randomUUID(),
+      id: headerId,
       extractedOrderId: extracted.id,
       companyId: input.companyId,
       internalState: input.header.internalState,
@@ -129,6 +148,24 @@ export class InMemoryPersistence implements Persistence {
       erpCustomerAccount: input.header.erpCustomerAccount,
       total: input.header.total,
       lineCount: input.header.lineCount,
+      sourceChannel: input.header.sourceChannel,
+      customerPoNumber: input.header.customerPoNumber,
+      poDate: input.header.poDate,
+      shipTo: input.header.shipTo,
+      billTo: input.header.billTo,
+      currency: input.header.currency,
+      rowVersion: 0,
+      lines: input.lines.map((l: OrderLineWrite, i) => ({
+        lineId: `${headerId}:L${i + 1}`,
+        sourceLineNo: l.sourceLineNo,
+        customerItemCode: l.customerItemCode,
+        erpItemId: l.erpItemId,
+        quantity: l.quantity,
+        uom: l.uom,
+        unitPrice: l.unitPrice,
+        extendedAmount: l.extendedAmount,
+      })),
+      normalizedJson: input.extraction.normalizedJson,
     };
     this.headerByExtractedId.set(extracted.id, header);
     this.validationByHeaderId.set(
@@ -185,14 +222,116 @@ export class InMemoryPersistence implements Persistence {
     return undefined;
   }
 
-  async getOrderHeaderById(id: string): Promise<OrderHeaderRow | null> {
-    for (const h of this.headerByExtractedId.values()) {
-      if (h.id === id) {
-        const { extractedOrderId: _drop, ...row } = h;
-        return row;
-      }
+  private static toSummary(h: OrderHeader): OrderSummaryRow {
+    return {
+      id: h.id,
+      companyId: h.companyId,
+      customerPoNumber: h.customerPoNumber,
+      normalizedPoNumber: h.normalizedPoNumber,
+      erpCustomerAccount: h.erpCustomerAccount,
+      simpleStatus: h.simpleStatus,
+      internalState: h.internalState,
+      total: h.total,
+      lineCount: h.lineCount,
+      rowVersion: h.rowVersion,
+    };
+  }
+
+  async listOrders(filter: ListOrdersFilter): Promise<OrderSummaryRow[]> {
+    let rows = [...this.headerByExtractedId.values()];
+    if (filter.companyId) rows = rows.filter((h) => h.companyId === filter.companyId);
+    if (filter.internalState) rows = rows.filter((h) => h.internalState === filter.internalState);
+    rows = rows.slice(0, filter.limit ?? 100);
+    return rows.map((h) => InMemoryPersistence.toSummary(h));
+  }
+
+  async getOrderForReview(orderHeaderId: string): Promise<OrderReviewDetail | null> {
+    const h = this.findHeader(orderHeaderId);
+    if (!h) return null;
+    let normalized: unknown = null;
+    try {
+      normalized = JSON.parse(h.normalizedJson);
+    } catch {
+      normalized = null;
     }
-    return null;
+    return {
+      header: {
+        id: h.id,
+        companyId: h.companyId,
+        sourceChannel: h.sourceChannel,
+        customerPoNumber: h.customerPoNumber,
+        normalizedPoNumber: h.normalizedPoNumber,
+        erpCustomerAccount: h.erpCustomerAccount,
+        poDate: h.poDate,
+        shipTo: h.shipTo,
+        billTo: h.billTo,
+        currency: h.currency,
+        total: h.total,
+        simpleStatus: h.simpleStatus,
+        internalState: h.internalState,
+        rowVersion: h.rowVersion,
+      },
+      lines: h.lines.map((l) => ({ ...l })),
+      validation: (this.validationByHeaderId.get(h.id) ?? []).map((v) => ({ ...v })),
+      normalized,
+    };
+  }
+
+  async updateOrderFields(orderHeaderId: string, expectedRowVersion: number, patch: UpdateOrderInput, _actor: string): Promise<OptimisticResult> {
+    const h = this.findHeader(orderHeaderId);
+    if (!h) return { status: "NOT_FOUND" };
+    if (h.rowVersion !== expectedRowVersion) return { status: "CONFLICT", rowVersion: h.rowVersion };
+
+    if (patch.header) {
+      const p = patch.header;
+      if (p.erpCustomerAccount !== undefined) h.erpCustomerAccount = p.erpCustomerAccount;
+      if (p.customerPoNumber !== undefined) h.customerPoNumber = p.customerPoNumber;
+      if (p.poDate !== undefined) h.poDate = p.poDate;
+      if (p.shipTo !== undefined) h.shipTo = p.shipTo;
+      if (p.billTo !== undefined) h.billTo = p.billTo;
+      if (p.currency !== undefined) h.currency = p.currency;
+      if (p.total !== undefined) h.total = p.total;
+    }
+    for (const lp of patch.lines ?? []) {
+      const line = h.lines.find((l) => l.lineId === lp.lineId);
+      if (!line) continue;
+      if (lp.erpItemId !== undefined) line.erpItemId = lp.erpItemId;
+      if (lp.quantity !== undefined) line.quantity = lp.quantity;
+      if (lp.uom !== undefined) line.uom = lp.uom;
+      if (lp.unitPrice !== undefined) line.unitPrice = lp.unitPrice;
+    }
+    h.rowVersion += 1;
+    return { status: "OK", rowVersion: h.rowVersion };
+  }
+
+  async reviewDecision(orderHeaderId: string, decision: ReviewDecisionKind, expectedRowVersion: number, _actor: string): Promise<OptimisticResult> {
+    const h = this.findHeader(orderHeaderId);
+    if (!h) return { status: "NOT_FOUND" };
+    if (h.rowVersion !== expectedRowVersion) return { status: "CONFLICT", rowVersion: h.rowVersion };
+    if (decision === "APPROVE") {
+      h.internalState = "READY";
+      h.simpleStatus = "Ready";
+    } else {
+      h.internalState = "REJECTED";
+      h.simpleStatus = "Rejected";
+    }
+    h.rowVersion += 1;
+    return { status: "OK", rowVersion: h.rowVersion };
+  }
+
+  async getOrderHeaderById(id: string): Promise<OrderHeaderRow | null> {
+    const h = this.findHeader(id);
+    if (!h) return null;
+    return {
+      id: h.id,
+      companyId: h.companyId,
+      internalState: h.internalState,
+      simpleStatus: h.simpleStatus,
+      normalizedPoNumber: h.normalizedPoNumber,
+      erpCustomerAccount: h.erpCustomerAccount,
+      total: h.total,
+      lineCount: h.lineCount,
+    };
   }
 
   async getValidationByOrderId(orderHeaderId: string): Promise<ValidationRow[]> {

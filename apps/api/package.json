@@ -6,6 +6,7 @@
   "main": "src/index.ts",
   "dependencies": {
     "@coa/messaging": "*",
+    "@coa/persistence": "*",
     "fastify": "^5.12.8"
   }
 }

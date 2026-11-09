@@ -24,6 +24,10 @@ async function main(): Promise<void> {
     },
   };
 
+  // NOTE: the reviewer workbench routes (/orders) are intentionally NOT wired here yet. They
+  // require the real Entra OIDC authenticator (a later slice) — serving them with the DEV
+  // header authenticator on a network-reachable endpoint would be a security hole (spec §3).
+  // They are fully built + tested via buildServer({ persistence, authenticate }).
   const app = await buildServer({ graphClientState: config.graphClientState, graph, logger: true });
 
   await app.listen({ host: config.host, port: config.port });

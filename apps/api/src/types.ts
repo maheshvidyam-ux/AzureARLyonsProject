@@ -9,10 +9,17 @@ export interface GraphNotificationSink {
   onLifecycleEvents?(events: Array<{ subscriptionId?: string; event: string }>): Promise<void>;
 }
 
+import type { Persistence } from "@coa/persistence";
+import type { Authenticator } from "./auth.js";
+
 export interface ServerDeps {
   /** Secret set on the Graph subscription; notifications must echo it (spec §3). */
   graphClientState: string;
   graph: GraphNotificationSink;
+  /** When provided, the reviewer workbench routes (/orders) are registered. */
+  persistence?: Persistence;
+  /** Authenticator for the reviewer routes (defaults to the DEV header authenticator). */
+  authenticate?: Authenticator;
   /** Fastify logger option (false in tests). */
   logger?: boolean;
 }

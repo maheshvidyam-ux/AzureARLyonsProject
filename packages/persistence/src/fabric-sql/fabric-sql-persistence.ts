@@ -14,15 +14,21 @@ import type {
   DuplicateClaimResult,
   IngestionInput,
   IngestionResult,
+  ListOrdersFilter,
   MailMessageRow,
   MarkFailedInput,
+  OptimisticResult,
   OrderHeaderRow,
+  OrderReviewDetail,
+  OrderSummaryRow,
   Persistence,
   RecordDocumentInput,
   RecordDocumentResult,
+  ReviewDecisionKind,
   SaveProcessedOrderInput,
   SaveProcessedOrderResult,
   SeedExternalClaimInput,
+  UpdateOrderInput,
   ValidationRow,
 } from "../ports.js";
 
@@ -305,6 +311,187 @@ export class FabricSqlPersistence implements Persistence {
     }
   }
 
+  async listOrders(filter: ListOrdersFilter): Promise<OrderSummaryRow[]> {
+    const top = Math.max(1, Math.min(filter.limit ?? 100, 500));
+    const res = await this.pool
+      .request()
+      .input("company", sql.VarChar(20), filter.companyId ?? null)
+      .input("state", sql.VarChar(20), filter.internalState ?? null)
+      .query(
+        `SELECT TOP (${top}) id, company_id, customer_po_number, normalized_po_number, erp_customer_account,
+                simple_status, internal_state, total, line_count, row_version
+         FROM dbo.order_header
+         WHERE (@company IS NULL OR company_id = @company)
+           AND (@state IS NULL OR internal_state = @state)
+         ORDER BY created_at DESC`,
+      );
+    return res.recordset.map((r) => ({
+      id: r.id,
+      companyId: r.company_id,
+      customerPoNumber: r.customer_po_number,
+      normalizedPoNumber: r.normalized_po_number,
+      erpCustomerAccount: r.erp_customer_account,
+      simpleStatus: r.simple_status,
+      internalState: r.internal_state,
+      total: r.total,
+      lineCount: r.line_count,
+      rowVersion: r.row_version,
+    }));
+  }
+
+  async getOrderForReview(orderHeaderId: string): Promise<OrderReviewDetail | null> {
+    const hRes = await this.pool
+      .request()
+      .input("id", sql.UniqueIdentifier, orderHeaderId)
+      .query(
+        `SELECT h.id, h.company_id, h.source_channel, h.customer_po_number, h.normalized_po_number,
+                h.erp_customer_account, h.po_date, h.ship_to, h.bill_to, h.currency, h.total,
+                h.simple_status, h.internal_state, h.row_version, e.normalized
+         FROM dbo.order_header h JOIN dbo.extracted_order e ON e.id = h.extracted_order_id
+         WHERE h.id = @id`,
+      );
+    const r = hRes.recordset[0];
+    if (!r) return null;
+
+    const [lines, validation] = await Promise.all([
+      this.pool.request().input("id", sql.UniqueIdentifier, orderHeaderId).query(
+        `SELECT id, source_line_no, customer_item_code, erp_item_id, quantity, uom, unit_price, extended_amount
+         FROM dbo.order_line WHERE order_header_id = @id ORDER BY source_line_no`,
+      ),
+      this.getValidationByOrderId(orderHeaderId),
+    ]);
+
+    let normalized: unknown = null;
+    try {
+      normalized = r.normalized ? JSON.parse(r.normalized) : null;
+    } catch {
+      normalized = null;
+    }
+
+    return {
+      header: {
+        id: r.id,
+        companyId: r.company_id,
+        sourceChannel: r.source_channel,
+        customerPoNumber: r.customer_po_number,
+        normalizedPoNumber: r.normalized_po_number,
+        erpCustomerAccount: r.erp_customer_account,
+        poDate: r.po_date ? toDateString(r.po_date) : null,
+        shipTo: r.ship_to,
+        billTo: r.bill_to,
+        currency: r.currency,
+        total: r.total,
+        simpleStatus: r.simple_status,
+        internalState: r.internal_state,
+        rowVersion: r.row_version,
+      },
+      lines: lines.recordset.map((l) => ({
+        lineId: l.id,
+        sourceLineNo: l.source_line_no,
+        customerItemCode: l.customer_item_code,
+        erpItemId: l.erp_item_id,
+        quantity: l.quantity,
+        uom: l.uom,
+        unitPrice: l.unit_price,
+        extendedAmount: l.extended_amount,
+      })),
+      validation,
+      normalized,
+    };
+  }
+
+  async updateOrderFields(orderHeaderId: string, expectedRowVersion: number, patch: UpdateOrderInput, actor: string): Promise<OptimisticResult> {
+    const current = await this.getOrderForReview(orderHeaderId);
+    if (!current) return { status: "NOT_FOUND" };
+    if (current.header.rowVersion !== expectedRowVersion) return { status: "CONFLICT", rowVersion: current.header.rowVersion };
+
+    const h = { ...current.header, ...(patch.header ?? {}) };
+    const tx = new sql.Transaction(this.pool);
+    await tx.begin();
+    try {
+      const upd = await new sql.Request(tx)
+        .input("id", sql.UniqueIdentifier, orderHeaderId)
+        .input("exp", sql.Int, expectedRowVersion)
+        .input("erpAcct", sql.VarChar(50), h.erpCustomerAccount)
+        .input("poNum", sql.VarChar(100), h.customerPoNumber)
+        .input("poDate", sql.Date, h.poDate ? new Date(h.poDate) : null)
+        .input("shipTo", sql.NVarChar(1024), h.shipTo)
+        .input("billTo", sql.NVarChar(1024), h.billTo)
+        .input("currency", sql.Char(3), h.currency)
+        .input("total", sql.Decimal(18, 4), h.total)
+        .query(
+          `UPDATE dbo.order_header
+             SET erp_customer_account=@erpAcct, customer_po_number=@poNum, po_date=@poDate, ship_to=@shipTo,
+                 bill_to=@billTo, currency=@currency, total=@total, row_version = row_version + 1, updated_at = SYSUTCDATETIME()
+           WHERE id=@id AND row_version=@exp`,
+        );
+      if ((upd.rowsAffected[0] ?? 0) === 0) {
+        await safeRollback(tx);
+        return { status: "CONFLICT", rowVersion: current.header.rowVersion };
+      }
+
+      for (const lp of patch.lines ?? []) {
+        const cur = current.lines.find((l) => l.lineId === lp.lineId);
+        if (!cur) continue;
+        await new sql.Request(tx)
+          .input("id", sql.UniqueIdentifier, lp.lineId)
+          .input("erpItem", sql.VarChar(50), lp.erpItemId !== undefined ? lp.erpItemId : cur.erpItemId)
+          .input("qty", sql.Decimal(18, 4), lp.quantity !== undefined ? lp.quantity : cur.quantity)
+          .input("uom", sql.VarChar(20), lp.uom !== undefined ? lp.uom : cur.uom)
+          .input("price", sql.Decimal(18, 4), lp.unitPrice !== undefined ? lp.unitPrice : cur.unitPrice)
+          .query(`UPDATE dbo.order_line SET erp_item_id=@erpItem, quantity=@qty, uom=@uom, unit_price=@price WHERE id=@id`);
+      }
+
+      await insertAudit(tx, current.header.companyId, actor, "ORDER_EDIT", orderHeaderId, JSON.stringify(patch));
+      await tx.commit();
+      return { status: "OK", rowVersion: expectedRowVersion + 1 };
+    } catch (e) {
+      await safeRollback(tx);
+      throw e;
+    }
+  }
+
+  async reviewDecision(orderHeaderId: string, decision: ReviewDecisionKind, expectedRowVersion: number, actor: string): Promise<OptimisticResult> {
+    const current = await this.getOrderForReview(orderHeaderId);
+    if (!current) return { status: "NOT_FOUND" };
+    if (current.header.rowVersion !== expectedRowVersion) return { status: "CONFLICT", rowVersion: current.header.rowVersion };
+
+    const internal = decision === "APPROVE" ? "READY" : "REJECTED";
+    const simple = decision === "APPROVE" ? "Ready" : "Rejected";
+    const tx = new sql.Transaction(this.pool);
+    await tx.begin();
+    try {
+      const upd = await new sql.Request(tx)
+        .input("id", sql.UniqueIdentifier, orderHeaderId)
+        .input("exp", sql.Int, expectedRowVersion)
+        .input("s", sql.VarChar(20), internal)
+        .input("ss", sql.VarChar(20), simple)
+        .query(
+          `UPDATE dbo.order_header SET internal_state=@s, simple_status=@ss, row_version = row_version + 1, updated_at = SYSUTCDATETIME()
+           WHERE id=@id AND row_version=@exp`,
+        );
+      if ((upd.rowsAffected[0] ?? 0) === 0) {
+        await safeRollback(tx);
+        return { status: "CONFLICT", rowVersion: current.header.rowVersion };
+      }
+      await new sql.Request(tx)
+        .input("id", sql.UniqueIdentifier, orderHeaderId)
+        .input("from", sql.VarChar(20), current.header.internalState)
+        .input("to", sql.VarChar(20), internal)
+        .input("actor", sql.VarChar(40), actor)
+        .query(
+          `INSERT INTO dbo.order_status_history (order_header_id, from_state, to_state, actor, reason)
+           VALUES (@id, @from, @to, @actor, 'reviewer decision')`,
+        );
+      await insertAudit(tx, current.header.companyId, actor, decision === "APPROVE" ? "ORDER_APPROVE" : "ORDER_REJECT", orderHeaderId, null);
+      await tx.commit();
+      return { status: "OK", rowVersion: expectedRowVersion + 1 };
+    } catch (e) {
+      await safeRollback(tx);
+      throw e;
+    }
+  }
+
   async getOrderHeaderById(id: string): Promise<OrderHeaderRow | null> {
     const res = await this.pool
       .request()
@@ -387,6 +574,33 @@ async function getOrCreateIdTracked(
   if (found.recordset.length > 0) return { id: found.recordset[0].id, created: false };
   const inserted = await bindInsert(new sql.Request(tx)).query(insertSql);
   return { id: inserted.recordset[0].id, created: true };
+}
+
+async function insertAudit(
+  tx: sql.Transaction,
+  companyId: string,
+  actor: string,
+  action: string,
+  targetId: string,
+  afterJson: string | null,
+): Promise<void> {
+  await new sql.Request(tx)
+    .input("company", sql.VarChar(20), companyId)
+    .input("actor", sql.VarChar(80), actor)
+    .input("action", sql.VarChar(80), action)
+    .input("ttype", sql.VarChar(40), "order_header")
+    .input("tid", sql.VarChar(80), targetId)
+    .input("after", sql.NVarChar(sql.MAX), afterJson)
+    .query(
+      `INSERT INTO dbo.audit_event (company_id, actor, action, target_type, target_id, after_json)
+       VALUES (@company, @actor, @action, @ttype, @tid, @after)`,
+    );
+}
+
+/** Format a mssql Date/datetime value as YYYY-MM-DD. */
+function toDateString(d: Date | string): string {
+  const date = d instanceof Date ? d : new Date(d);
+  return date.toISOString().slice(0, 10);
 }
 
 /** SQL Server unique-constraint / unique-index violation error numbers. */
