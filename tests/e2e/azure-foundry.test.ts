@@ -80,5 +80,5 @@ describe.skipIf(!hasFoundry)("AI Foundry (live)", () => {
     const { createAzureFoundryClient } = await import("../../apps/workers/src/interpretation/index.js");
     const res = await createAzureFoundryClient().interpret({ di: DI, blob });
     expect(() => JSON.parse(res.rawJson)).not.toThrow();
-  });
+  }, 120_000); // real model inference
 });

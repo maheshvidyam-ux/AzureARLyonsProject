@@ -56,5 +56,5 @@ describe.skipIf(!hasDi)("AzureDocumentIntelligenceClient (live)", () => {
     const di = await client.analyze({ blob: { blobUri: process.env.DOC_INTEL_SAMPLE_URL!, filename: "sample.pdf", contentHash: "live" } });
     expect(di.pages).toBeGreaterThan(0);
     expect(Object.keys(di.fields).length).toBeGreaterThan(0);
-  });
+  }, 120_000); // real DI analysis polls for several seconds
 });
