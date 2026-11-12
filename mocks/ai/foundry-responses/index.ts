@@ -5,12 +5,11 @@
  * client) or a `malformedRaw` string that is deliberately NOT valid JSON, to exercise
  * the §16 "AI returns malformed JSON" degradation path.
  */
-import type { FoundryPoDraft } from "../../../apps/workers/src/pipeline/foundry-draft.js";
-
 export interface FoundryFixture {
   deployment: string;
   promptVersion: string;
-  draft?: FoundryPoDraft;
+  /** Serialized to rawJson by the mock client. AR uses FoundryPoDraft, AP uses FoundryInvoiceDraft. */
+  draft?: unknown;
   malformedRaw?: string;
 }
 
@@ -113,5 +112,45 @@ export const FOUNDRY_RESPONSES: Record<string, FoundryFixture> = {
     deployment: "gpt-4o-po-interpret",
     promptVersion: "po-interpret-2026.11.1",
     malformedRaw: '{"company":{"company_id":"USMF"},"header":{"customer_po_number":{"value":"PO-100047"',
+  },
+
+  // --- AP vendor invoices (FoundryInvoiceDraft shape) ---
+  "sample-inv-po-001": {
+    deployment: "gpt-4o-invoice",
+    promptVersion: "invoice-interpret-2026.11.1",
+    draft: {
+      company: { company_id: "USMF", resolved_from: "document" },
+      header: {
+        vendor: { name: { value: "Acme Industrial Supply" }, erp_vendor_account: { value: null }, match_status: "UNMATCHED" },
+        invoice_number: { value: "INV-5001" },
+        invoice_date: { value: "2026-11-02" },
+        po_number: { value: "PO-100045" },
+        currency: { value: "USD" },
+        totals: { subtotal: { amount: 750, currency: "USD" }, tax: { amount: 0, currency: "USD" }, grand_total: { amount: 750, currency: "USD" } },
+      },
+      lines: [{ po_line_ref: { value: "1" }, description: { value: "1/2in Hex Bolt, Zinc" }, quantity: { value: 500 }, uom: { value: "EA" }, unit_price: { value: 1.5 }, amount: { value: 750 } }],
+      overall_confidence: 0.95,
+    },
+  },
+  "sample-inv-nonpo-001": {
+    deployment: "gpt-4o-invoice",
+    promptVersion: "invoice-interpret-2026.11.1",
+    draft: {
+      company: { company_id: "USMF", resolved_from: "document" },
+      header: {
+        vendor: { name: { value: "Globex Corporation" }, erp_vendor_account: { value: null }, match_status: "UNMATCHED" },
+        invoice_number: { value: "GBX-9007" },
+        invoice_date: { value: "2026-11-03" },
+        currency: { value: "USD" },
+        totals: { subtotal: { amount: 1200, currency: "USD" }, tax: { amount: 0, currency: "USD" }, grand_total: { amount: 1200, currency: "USD" } },
+      },
+      lines: [],
+      overall_confidence: 0.9,
+    },
+  },
+  "sample-inv-bad": {
+    deployment: "gpt-4o-invoice",
+    promptVersion: "invoice-interpret-2026.11.1",
+    malformedRaw: '{"company":{"company_id":"USMF"},"header":{"invoice_number":{"value":"INV-BAD"',
   },
 };

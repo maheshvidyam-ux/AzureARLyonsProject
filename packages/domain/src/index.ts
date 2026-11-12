@@ -14,4 +14,5 @@ export const MODULE_CODE: ModuleCode = "ORDER_PROCESSING";
 
 export * from "./status.js";
 export * from "./po-number.js";
+export * from "./invoice-number.js";
 export * from "./company.js";

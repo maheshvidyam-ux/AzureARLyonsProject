@@ -92,4 +92,9 @@ export const DI_RESPONSES: Record<string, DiLayoutResult> = {
     ],
     documentQualityFlags: ["TABLE_SPANS_PAGES"],
   },
+
+  // --- AP vendor invoices (fields unused by invoice-normalize; Foundry draft drives it) ---
+  "sample-inv-po-001": { diModelVersion: "prebuilt-invoice:2024-11-30", pages: 1, fields: {}, lines: [], documentQualityFlags: [] },
+  "sample-inv-nonpo-001": { diModelVersion: "prebuilt-invoice:2024-11-30", pages: 1, fields: {}, lines: [], documentQualityFlags: [] },
+  "sample-inv-bad": { diModelVersion: "prebuilt-invoice:2024-11-30", pages: 1, fields: {}, lines: [], documentQualityFlags: [] },
 };

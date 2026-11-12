@@ -1,4 +1,5 @@
 export * from "./ports.js";
+export * from "./invoice-masters.js";
 export { InMemoryMasterDataReader, type InMemoryMasterDataOptions } from "./in-memory-reader.js";
 export {
   FabricLakehouseMasterDataReader,
