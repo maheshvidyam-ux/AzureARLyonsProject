@@ -6,9 +6,14 @@
 import { randomUUID } from "node:crypto";
 import type {
   ClaimDuplicateInput,
+  ClaimInvoiceInput,
   DuplicateChannel,
   DuplicateClaimResult,
   IngestionInput,
+  InvoiceLineWrite,
+  SaveInvoiceInput,
+  SaveInvoiceResult,
+  StagedVendorInvoiceRow,
   IngestionResult,
   ListOrdersFilter,
   MailMessageRow,
@@ -72,6 +77,28 @@ interface StagingRecord extends StagedOrderRow {
   lines: Array<{ lineNo: number | null; erpItemId: string | null; customerItemCode: string | null; quantity: number | null; uom: string | null; unitPrice: number | null }>;
 }
 
+interface InvoiceRecord {
+  id: string;
+  sourceHash: string;
+  companyId: string;
+  invoiceType: "PO_BASED" | "NON_PO";
+  erpVendorAccount: string | null;
+  vendorName: string | null;
+  invoiceNumber: string | null;
+  normalizedInvoiceNumber: string | null;
+  poNumber: string | null;
+  invoiceDate: string | null;
+  currency: string | null;
+  grandTotal: number | null;
+  lineCount: number;
+  simpleStatus: string;
+  internalState: string;
+  lines: InvoiceLineWrite[];
+}
+interface StagingInvoiceRecord extends StagedVendorInvoiceRow {
+  lines: InvoiceLineWrite[];
+}
+
 export class InMemoryPersistence implements Persistence {
   private readonly mailByGraphId = new Map<string, MailMessage>();
   private readonly attByGraphId = new Map<string, MailAttachment>();
@@ -83,6 +110,10 @@ export class InMemoryPersistence implements Persistence {
   private readonly activeClaims = new Map<string, { channel: DuplicateChannel; ref: string | null; orderHeaderId: string | null; claimId: string }>();
   /** Boomi staging records keyed by orderHeaderId (one per order). */
   private readonly stagingByOrder = new Map<string, StagingRecord>();
+  /** AP invoices keyed by source_hash (idempotent). */
+  private readonly invoiceByHash = new Map<string, InvoiceRecord>();
+  /** AP vendor-invoice staging keyed by ap_invoice_header_id. */
+  private readonly stagingInvoiceByHeader = new Map<string, StagingInvoiceRecord>();
 
   async ingest(input: IngestionInput): Promise<IngestionResult> {
     let message = this.mailByGraphId.get(input.graphMessageId);
@@ -410,6 +441,101 @@ export class InMemoryPersistence implements Persistence {
 
   async countOrders(): Promise<number> {
     return this.headerByExtractedId.size;
+  }
+
+  // --- AP invoice ---
+  async saveProcessedInvoice(input: SaveInvoiceInput): Promise<SaveInvoiceResult> {
+    const existing = this.invoiceByHash.get(input.sourceHash);
+    if (existing) return { invoiceHeaderId: existing.id, created: false };
+    const id = randomUUID();
+    this.invoiceByHash.set(input.sourceHash, {
+      id,
+      sourceHash: input.sourceHash,
+      companyId: input.companyId,
+      invoiceType: input.invoiceType,
+      erpVendorAccount: input.header.erpVendorAccount,
+      vendorName: input.header.vendorName,
+      invoiceNumber: input.header.invoiceNumber,
+      normalizedInvoiceNumber: input.header.normalizedInvoiceNumber,
+      poNumber: input.header.poNumber,
+      invoiceDate: input.header.invoiceDate,
+      currency: input.header.currency,
+      grandTotal: input.header.grandTotal,
+      lineCount: input.header.lineCount,
+      simpleStatus: input.header.simpleStatus,
+      internalState: input.header.internalState,
+      lines: input.lines.map((l) => ({ ...l })),
+    });
+    return { invoiceHeaderId: id, created: true };
+  }
+
+  async claimInvoice(input: ClaimInvoiceInput): Promise<DuplicateClaimResult> {
+    const existing = this.activeClaims.get(input.businessKey);
+    if (existing) {
+      if (existing.ref === input.invoiceRef) return { status: "CLAIMED", claimId: existing.claimId };
+      return { status: "COLLISION", matchedChannel: existing.channel, matchedExistingRef: existing.ref };
+    }
+    const claimId = randomUUID();
+    this.activeClaims.set(input.businessKey, { channel: "EMAIL", ref: input.invoiceRef, orderHeaderId: null, claimId });
+    return { status: "CLAIMED", claimId };
+  }
+
+  private findInvoice(id: string): InvoiceRecord | undefined {
+    for (const inv of this.invoiceByHash.values()) if (inv.id === id) return inv;
+    return undefined;
+  }
+
+  async stageInvoice(invoiceHeaderId: string): Promise<{ stagingId: string; created: boolean }> {
+    const inv = this.findInvoice(invoiceHeaderId);
+    if (!inv) throw new Error(`Cannot stage unknown invoice ${invoiceHeaderId}`);
+    const existing = this.stagingInvoiceByHeader.get(invoiceHeaderId);
+    if (existing) {
+      inv.internalState = "STAGED";
+      inv.simpleStatus = "Ready";
+      return { stagingId: existing.stagingId, created: false };
+    }
+    const stagingId = randomUUID();
+    this.stagingInvoiceByHeader.set(invoiceHeaderId, {
+      stagingId,
+      invoiceHeaderId,
+      dataAreaId: inv.companyId,
+      invoiceType: inv.invoiceType,
+      erpVendorAccount: inv.erpVendorAccount,
+      invoiceNumber: inv.invoiceNumber,
+      normalizedInvoiceNumber: inv.normalizedInvoiceNumber,
+      poNumber: inv.poNumber,
+      invoiceDate: inv.invoiceDate,
+      currency: inv.currency,
+      grandTotal: inv.grandTotal,
+      lineCount: inv.lineCount,
+      publishStatus: "READY",
+      axVoucherId: null,
+      lines: inv.lines.map((l) => ({ ...l })),
+    });
+    inv.internalState = "STAGED";
+    inv.simpleStatus = "Ready";
+    return { stagingId, created: true };
+  }
+
+  async listVendorInvoicesForBoomi(limit = 100): Promise<StagedVendorInvoiceRow[]> {
+    return [...this.stagingInvoiceByHeader.values()]
+      .filter((r) => r.publishStatus === "READY")
+      .slice(0, limit)
+      .map(({ lines: _lines, ...row }) => row);
+  }
+
+  async markVendorInvoiceResult(stagingId: string, result: { axVoucherId?: string; error?: string }): Promise<void> {
+    for (const rec of this.stagingInvoiceByHeader.values()) {
+      if (rec.stagingId !== stagingId) continue;
+      rec.publishStatus = result.error ? "FAILED" : "COMPLETED";
+      rec.axVoucherId = result.axVoucherId ?? null;
+      const inv = this.findInvoice(rec.invoiceHeaderId);
+      if (inv && !result.error) {
+        inv.internalState = "ERP_CREATED";
+        inv.simpleStatus = "Completed";
+      }
+      return;
+    }
   }
 
   async close(): Promise<void> {

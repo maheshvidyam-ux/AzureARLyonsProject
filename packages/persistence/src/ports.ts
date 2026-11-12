@@ -265,6 +265,72 @@ export interface StagedOrderRow {
   axSalesOrderId: string | null;
 }
 
+// --- AP invoice (AP_INVOICE module, ADR 0008) ---
+export interface InvoiceLineWrite {
+  sourceLineNo: number | null;
+  poLineRef: string | null;
+  erpItemId: string | null;
+  glAccount: string | null;
+  description: string | null;
+  quantity: number | null;
+  uom: string | null;
+  unitPrice: number | null;
+  amount: number | null;
+  matchStatus: string | null;
+  isCodeAndApprove: boolean;
+}
+export interface SaveInvoiceInput {
+  /** content hash of the source document → idempotency */
+  sourceHash: string;
+  companyId: string;
+  invoiceType: "PO_BASED" | "NON_PO";
+  header: {
+    erpVendorAccount: string | null;
+    vendorName: string | null;
+    invoiceNumber: string | null;
+    normalizedInvoiceNumber: string | null;
+    poNumber: string | null;
+    invoiceDate: string | null;
+    currency: string | null;
+    subtotal: number | null;
+    tax: number | null;
+    grandTotal: number | null;
+    lineCount: number;
+    simpleStatus: string;
+    internalState: string;
+  };
+  lines: InvoiceLineWrite[];
+  validation: ValidationWrite[];
+  extraction: { rawExtractionJson: string; normalizedJson: string; overallConfidence?: number | null };
+  blobUri?: string | null;
+}
+export interface SaveInvoiceResult {
+  invoiceHeaderId: string;
+  created: boolean;
+}
+export interface ClaimInvoiceInput {
+  companyId: string;
+  businessKey: string;
+  /** stable invoice reference (document id) so re-claim by the same invoice is idempotent */
+  invoiceRef: string;
+}
+export interface StagedVendorInvoiceRow {
+  stagingId: string;
+  invoiceHeaderId: string;
+  dataAreaId: string;
+  invoiceType: string;
+  erpVendorAccount: string | null;
+  invoiceNumber: string | null;
+  normalizedInvoiceNumber: string | null;
+  poNumber: string | null;
+  invoiceDate: string | null;
+  currency: string | null;
+  grandTotal: number | null;
+  lineCount: number;
+  publishStatus: string;
+  axVoucherId: string | null;
+}
+
 export interface Persistence {
   ingest(input: IngestionInput): Promise<IngestionResult>;
   recordDocument(input: RecordDocumentInput): Promise<RecordDocumentResult>;
@@ -296,6 +362,18 @@ export interface Persistence {
   listReadyForBoomi(limit?: number): Promise<StagedOrderRow[]>;
   /** Boomi acknowledgment: record the AX sales order id (or a failure) and complete the order. */
   markBoomiResult(stagingId: string, result: { axSalesOrderId?: string; error?: string }): Promise<void>;
+
+  // --- AP invoice ---
+  /** Persist a processed vendor invoice (idempotent on source_hash). */
+  saveProcessedInvoice(input: SaveInvoiceInput): Promise<SaveInvoiceResult>;
+  /** Atomically reserve the invoice dedup key (reuses the shared filtered-unique-index claim). */
+  claimInvoice(input: ClaimInvoiceInput): Promise<DuplicateClaimResult>;
+  /** Publish a vendor invoice to the Boomi staging table (idempotent) and set it STAGED. */
+  stageInvoice(invoiceHeaderId: string): Promise<StageOrderResult>;
+  /** Vendor invoices Boomi can pick up (publish_status = READY). */
+  listVendorInvoicesForBoomi(limit?: number): Promise<StagedVendorInvoiceRow[]>;
+  /** Boomi ack: record the AX voucher id (or a failure) and complete the invoice. */
+  markVendorInvoiceResult(stagingId: string, result: { axVoucherId?: string; error?: string }): Promise<void>;
 
   getOrderHeaderById(id: string): Promise<OrderHeaderRow | null>;
   getValidationByOrderId(orderHeaderId: string): Promise<ValidationRow[]>;

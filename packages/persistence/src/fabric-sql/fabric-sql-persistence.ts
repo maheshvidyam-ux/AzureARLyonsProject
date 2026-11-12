@@ -10,9 +10,13 @@
 import sql from "mssql";
 import type {
   ClaimDuplicateInput,
+  ClaimInvoiceInput,
   DuplicateChannel,
   DuplicateClaimResult,
   IngestionInput,
+  SaveInvoiceInput,
+  SaveInvoiceResult,
+  StagedVendorInvoiceRow,
   IngestionResult,
   ListOrdersFilter,
   MailMessageRow,
@@ -591,6 +595,217 @@ export class FabricSqlPersistence implements Persistence {
         if (oh) {
           await new sql.Request(tx).input("id", sql.UniqueIdentifier, oh.order_header_id).query("UPDATE dbo.order_header SET internal_state='ERP_CREATED', simple_status='Completed', updated_at=SYSUTCDATETIME() WHERE id=@id");
           await new sql.Request(tx).input("id", sql.UniqueIdentifier, oh.order_header_id).input("ax", sql.VarChar(60), result.axSalesOrderId ?? null).query("INSERT INTO dbo.integration_ack (order_header_id, boomi_status, ax_sales_order_id) VALUES (@id,'COMPLETED',@ax)");
+        }
+      }
+      await tx.commit();
+    } catch (e) {
+      await safeRollback(tx);
+      throw e;
+    }
+  }
+
+  // --- AP invoice ---
+  async saveProcessedInvoice(input: SaveInvoiceInput): Promise<SaveInvoiceResult> {
+    const ex = await this.pool.request().input("h", sql.Char(64), input.sourceHash).query("SELECT id FROM dbo.ap_invoice_header WHERE source_hash = @h");
+    if (ex.recordset.length > 0) return { invoiceHeaderId: ex.recordset[0].id, created: false };
+
+    const tx = new sql.Transaction(this.pool);
+    await tx.begin();
+    try {
+      const h = input.header;
+      const headRes = await new sql.Request(tx)
+        .input("hash", sql.Char(64), input.sourceHash)
+        .input("company", sql.VarChar(20), input.companyId)
+        .input("type", sql.VarChar(10), input.invoiceType)
+        .input("vacct", sql.VarChar(50), h.erpVendorAccount)
+        .input("vname", sql.NVarChar(512), h.vendorName)
+        .input("invno", sql.VarChar(100), h.invoiceNumber)
+        .input("ninvno", sql.VarChar(100), h.normalizedInvoiceNumber)
+        .input("po", sql.VarChar(100), h.poNumber)
+        .input("idate", sql.Date, h.invoiceDate ? new Date(h.invoiceDate) : null)
+        .input("cur", sql.Char(3), h.currency)
+        .input("sub", sql.Decimal(18, 4), h.subtotal)
+        .input("tax", sql.Decimal(18, 4), h.tax)
+        .input("gt", sql.Decimal(18, 4), h.grandTotal)
+        .input("lc", sql.Int, h.lineCount)
+        .input("ss", sql.VarChar(20), h.simpleStatus)
+        .input("is", sql.VarChar(20), h.internalState)
+        .input("raw", sql.NVarChar(sql.MAX), input.extraction.rawExtractionJson)
+        .input("norm", sql.NVarChar(sql.MAX), input.extraction.normalizedJson)
+        .input("conf", sql.Decimal(5, 4), input.extraction.overallConfidence ?? null)
+        .input("blob", sql.VarChar(1024), input.blobUri ?? null)
+        .query(
+          `INSERT INTO dbo.ap_invoice_header
+             (source_hash, company_id, invoice_type, erp_vendor_account, vendor_name, invoice_number, normalized_invoice_number,
+              po_number, invoice_date, currency, subtotal, tax, grand_total, line_count, simple_status, internal_state,
+              raw_extraction, normalized, overall_confidence, blob_uri)
+           OUTPUT INSERTED.id
+           VALUES (@hash,@company,@type,@vacct,@vname,@invno,@ninvno,@po,@idate,@cur,@sub,@tax,@gt,@lc,@ss,@is,@raw,@norm,@conf,@blob)`,
+        );
+      const invoiceHeaderId: string = headRes.recordset[0].id;
+
+      for (const l of input.lines) {
+        await new sql.Request(tx)
+          .input("hid", sql.UniqueIdentifier, invoiceHeaderId)
+          .input("ln", sql.Int, l.sourceLineNo)
+          .input("poref", sql.VarChar(50), l.poLineRef)
+          .input("item", sql.VarChar(50), l.erpItemId)
+          .input("gl", sql.VarChar(50), l.glAccount)
+          .input("desc", sql.NVarChar(512), l.description)
+          .input("qty", sql.Decimal(18, 4), l.quantity)
+          .input("uom", sql.VarChar(20), l.uom)
+          .input("price", sql.Decimal(18, 4), l.unitPrice)
+          .input("amt", sql.Decimal(18, 4), l.amount)
+          .input("ms", sql.VarChar(30), l.matchStatus)
+          .input("ca", sql.Bit, l.isCodeAndApprove)
+          .query(
+            `INSERT INTO dbo.ap_invoice_line (ap_invoice_header_id, source_line_no, po_line_ref, erp_item_id, gl_account, description, quantity, uom, unit_price, amount, match_status, is_code_and_approve)
+             VALUES (@hid,@ln,@poref,@item,@gl,@desc,@qty,@uom,@price,@amt,@ms,@ca)`,
+          );
+      }
+      for (const v of input.validation) {
+        await new sql.Request(tx)
+          .input("hid", sql.UniqueIdentifier, invoiceHeaderId)
+          .input("sev", sql.VarChar(10), v.severity)
+          .input("code", sql.VarChar(80), v.code)
+          .input("fp", sql.VarChar(200), v.fieldPath)
+          .input("msg", sql.NVarChar(2000), v.message)
+          .input("bl", sql.Bit, v.blocking)
+          .query(`INSERT INTO dbo.ap_invoice_validation (ap_invoice_header_id, severity, code, field_path, message, blocking) VALUES (@hid,@sev,@code,@fp,@msg,@bl)`);
+      }
+      await tx.commit();
+      return { invoiceHeaderId, created: true };
+    } catch (e) {
+      await safeRollback(tx);
+      if (isUniqueViolation(e)) {
+        const again = await this.pool.request().input("h", sql.Char(64), input.sourceHash).query("SELECT id FROM dbo.ap_invoice_header WHERE source_hash = @h");
+        if (again.recordset.length > 0) return { invoiceHeaderId: again.recordset[0].id, created: false };
+      }
+      throw e;
+    }
+  }
+
+  async claimInvoice(input: ClaimInvoiceInput): Promise<DuplicateClaimResult> {
+    try {
+      const res = await this.pool
+        .request()
+        .input("company", sql.VarChar(20), input.companyId)
+        .input("bk", sql.VarChar(220), input.businessKey)
+        .input("ref", sql.VarChar(100), input.invoiceRef)
+        .query(
+          `INSERT INTO dbo.duplicate_claim (company_id, business_key, order_header_id, status, matched_existing_ref, matched_channel)
+           OUTPUT INSERTED.id VALUES (@company, @bk, NULL, 'CLAIMED', @ref, 'EMAIL')`,
+        );
+      return { status: "CLAIMED", claimId: res.recordset[0].id };
+    } catch (e) {
+      if (!isUniqueViolation(e)) throw e;
+      const existing = await this.pool.request().input("bk", sql.VarChar(220), input.businessKey).query(
+        `SELECT TOP 1 id, matched_existing_ref FROM dbo.duplicate_claim WHERE business_key=@bk AND status IN ('CLAIMED','RESOLVED')`,
+      );
+      const r = existing.recordset[0];
+      if (r && r.matched_existing_ref === input.invoiceRef) return { status: "CLAIMED", claimId: r.id };
+      return { status: "COLLISION", matchedChannel: "EMAIL", matchedExistingRef: r?.matched_existing_ref ?? null };
+    }
+  }
+
+  async stageInvoice(invoiceHeaderId: string): Promise<{ stagingId: string; created: boolean }> {
+    const tx = new sql.Transaction(this.pool);
+    await tx.begin();
+    try {
+      const ex = await new sql.Request(tx).input("id", sql.UniqueIdentifier, invoiceHeaderId).query("SELECT id FROM dbo.staging_vendor_invoice WHERE ap_invoice_header_id=@id");
+      if (ex.recordset.length > 0) {
+        await new sql.Request(tx).input("id", sql.UniqueIdentifier, invoiceHeaderId).query("UPDATE dbo.ap_invoice_header SET internal_state='STAGED', simple_status='Ready', updated_at=SYSUTCDATETIME() WHERE id=@id");
+        await tx.commit();
+        return { stagingId: ex.recordset[0].id, created: false };
+      }
+      const h = (await new sql.Request(tx).input("id", sql.UniqueIdentifier, invoiceHeaderId).query(
+        `SELECT company_id, invoice_type, erp_vendor_account, invoice_number, normalized_invoice_number, po_number, invoice_date, currency, grand_total, line_count FROM dbo.ap_invoice_header WHERE id=@id`,
+      )).recordset[0];
+      if (!h) {
+        await safeRollback(tx);
+        throw new Error(`Cannot stage unknown invoice ${invoiceHeaderId}`);
+      }
+      const stagingId = (await new sql.Request(tx)
+        .input("hid", sql.UniqueIdentifier, invoiceHeaderId)
+        .input("dax", sql.VarChar(20), h.company_id)
+        .input("type", sql.VarChar(10), h.invoice_type)
+        .input("vacct", sql.VarChar(50), h.erp_vendor_account)
+        .input("invno", sql.VarChar(100), h.invoice_number)
+        .input("ninvno", sql.VarChar(100), h.normalized_invoice_number)
+        .input("po", sql.VarChar(100), h.po_number)
+        .input("idate", sql.Date, h.invoice_date)
+        .input("cur", sql.Char(3), h.currency)
+        .input("gt", sql.Decimal(18, 4), h.grand_total)
+        .input("lc", sql.Int, h.line_count)
+        .query(
+          `INSERT INTO dbo.staging_vendor_invoice (ap_invoice_header_id, data_area_id, invoice_type, erp_vendor_account, invoice_number, normalized_invoice_number, po_number, invoice_date, currency, grand_total, line_count, publish_status)
+           OUTPUT INSERTED.id VALUES (@hid,@dax,@type,@vacct,@invno,@ninvno,@po,@idate,@cur,@gt,@lc,'READY')`,
+        )).recordset[0].id;
+
+      const lines = await new sql.Request(tx).input("id", sql.UniqueIdentifier, invoiceHeaderId).query(
+        `SELECT source_line_no, po_line_ref, erp_item_id, gl_account, quantity, uom, unit_price, amount FROM dbo.ap_invoice_line WHERE ap_invoice_header_id=@id ORDER BY source_line_no`,
+      );
+      for (const l of lines.recordset) {
+        await new sql.Request(tx)
+          .input("sid", sql.UniqueIdentifier, stagingId)
+          .input("ln", sql.Int, l.source_line_no)
+          .input("poref", sql.VarChar(50), l.po_line_ref)
+          .input("item", sql.VarChar(50), l.erp_item_id)
+          .input("gl", sql.VarChar(50), l.gl_account)
+          .input("qty", sql.Decimal(18, 4), l.quantity)
+          .input("uom", sql.VarChar(20), l.uom)
+          .input("price", sql.Decimal(18, 4), l.unit_price)
+          .input("amt", sql.Decimal(18, 4), l.amount)
+          .query(`INSERT INTO dbo.staging_vendor_invoice_line (staging_invoice_id, line_no, po_line_ref, erp_item_id, gl_account, quantity, uom, unit_price, amount) VALUES (@sid,@ln,@poref,@item,@gl,@qty,@uom,@price,@amt)`);
+      }
+      await new sql.Request(tx).input("id", sql.UniqueIdentifier, invoiceHeaderId).query("UPDATE dbo.ap_invoice_header SET internal_state='STAGED', simple_status='Ready', updated_at=SYSUTCDATETIME() WHERE id=@id");
+      await tx.commit();
+      return { stagingId, created: true };
+    } catch (e) {
+      await safeRollback(tx);
+      throw e;
+    }
+  }
+
+  async listVendorInvoicesForBoomi(limit = 100): Promise<StagedVendorInvoiceRow[]> {
+    const top = Math.max(1, Math.min(limit, 500));
+    const res = await this.pool.request().query(
+      `SELECT TOP (${top}) id, ap_invoice_header_id, data_area_id, invoice_type, erp_vendor_account, invoice_number, normalized_invoice_number,
+              po_number, invoice_date, currency, grand_total, line_count, publish_status, ax_voucher_id
+       FROM dbo.staging_vendor_invoice WHERE publish_status='READY' ORDER BY created_at`,
+    );
+    return res.recordset.map((r) => ({
+      stagingId: r.id,
+      invoiceHeaderId: r.ap_invoice_header_id,
+      dataAreaId: r.data_area_id,
+      invoiceType: r.invoice_type,
+      erpVendorAccount: r.erp_vendor_account,
+      invoiceNumber: r.invoice_number,
+      normalizedInvoiceNumber: r.normalized_invoice_number,
+      poNumber: r.po_number,
+      invoiceDate: r.invoice_date ? toDateString(r.invoice_date) : null,
+      currency: r.currency,
+      grandTotal: r.grand_total,
+      lineCount: r.line_count,
+      publishStatus: r.publish_status,
+      axVoucherId: r.ax_voucher_id,
+    }));
+  }
+
+  async markVendorInvoiceResult(stagingId: string, result: { axVoucherId?: string; error?: string }): Promise<void> {
+    const tx = new sql.Transaction(this.pool);
+    await tx.begin();
+    try {
+      await new sql.Request(tx)
+        .input("id", sql.UniqueIdentifier, stagingId)
+        .input("st", sql.VarChar(20), result.error ? "FAILED" : "COMPLETED")
+        .input("ax", sql.VarChar(60), result.axVoucherId ?? null)
+        .input("err", sql.NVarChar(2000), result.error ?? null)
+        .query(`UPDATE dbo.staging_vendor_invoice SET publish_status=@st, ax_voucher_id=@ax, error_message=@err, updated_at=SYSUTCDATETIME() WHERE id=@id`);
+      if (!result.error) {
+        const row = (await new sql.Request(tx).input("id", sql.UniqueIdentifier, stagingId).query("SELECT ap_invoice_header_id FROM dbo.staging_vendor_invoice WHERE id=@id")).recordset[0];
+        if (row) {
+          await new sql.Request(tx).input("id", sql.UniqueIdentifier, row.ap_invoice_header_id).query("UPDATE dbo.ap_invoice_header SET internal_state='ERP_CREATED', simple_status='Completed', updated_at=SYSUTCDATETIME() WHERE id=@id");
         }
       }
       await tx.commit();
