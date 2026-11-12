@@ -1,12 +1,21 @@
-# Customer Order Automation
+# AzureARAP — Order & AP Invoice Automation (Lyons)
 
-Azure-native platform that receives customer purchase orders by Microsoft 365 email, extracts them with
-Azure AI Document Intelligence + AI Foundry, validates against Microsoft Fabric customer/item masters,
-blocks duplicates across Email **and** EDI, resolves exceptions in a reviewer UI, and publishes approved
-orders to Fabric staging for the **existing** Boomi EDI-850 subprocess that creates Dynamics AX 2012
-sales orders — learning from every correction.
+Azure-native platform that automates two document-driven finance processes on **one** shared pipeline
+(Microsoft 365 email → Azure AI Document Intelligence + AI Foundry → validate against Microsoft Fabric
+masters → resolve exceptions in a reviewer UI → publish to Fabric staging for the **existing** Boomi
+subprocess that posts to Dynamics AX 2012 — learning from every correction):
 
-> Spec: `Customer_Order_Automation_Azure_Implementation_Specification.pdf` (v1.0, Nov 2026).
+- **AR · Order Processing** (`ORDER_PROCESSING`) — customer purchase orders → AX **sales orders**;
+  duplicates blocked across Email **and** EDI (atomic claim).
+- **AP · Invoice Processing** (`AP_INVOICE`) — vendor invoices → AX **vendor invoices / AP vouchers**;
+  PO / receipt matching (2-way/3-way), duplicate-invoice prevention.
+
+The two run as separate **modules** (spec §10 `module_code` seam) sharing ingestion, extraction, the
+reviewer workbench, persistence (SQL database in Fabric), Service Bus, and Boomi staging — differing only
+in schema, matching/validation rules, and the AX target. See **[ADR 0008](docs/adr/0008-ap-invoice-module.md)**.
+
+> Spec: `Customer_Order_Automation_Azure_Implementation_Specification.pdf` (v1.0, Nov 2026). AP invoice
+> automation is an additional module on the same architecture (its own spec/§ references TBD).
 
 ## Status
 

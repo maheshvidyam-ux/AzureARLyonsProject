@@ -13,3 +13,4 @@ Consequences → Status.
 | [0005](0005-ai-suggests-rules-authorize.md) | AI suggests, deterministic rules authorize | Accepted (from spec) |
 | [0006](0006-stack-and-hosting.md) | Backend stack = TypeScript; Azure Container Apps | Proposed — blocked by Q-ENV-1/3 |
 | [0007](0007-operational-datastore.md) | Operational datastore = SQL database in Fabric | ✅ Accepted — supersedes 0001 |
+| [0008](0008-ap-invoice-module.md) | AP invoice automation as a second module (`AP_INVOICE`) | Proposed |

@@ -1,8 +1,8 @@
 {
-  "name": "customer-order-automation",
+  "name": "azure-arap-lyons",
   "version": "0.1.0",
   "private": true,
-  "description": "Azure-native Customer Order Automation — Phase 1 first vertical slice (ingest one PO end-to-no-stage, fully mocked).",
+  "description": "Azure-native AR order + AP invoice automation (Lyons) on one shared pipeline — M365 email → DI/Foundry → Fabric masters → reviewer → Boomi/AX. Two modules: ORDER_PROCESSING, AP_INVOICE.",
   "type": "module",
   "engines": {
     "node": ">=20"
