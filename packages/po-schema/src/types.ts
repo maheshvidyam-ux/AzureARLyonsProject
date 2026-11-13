@@ -103,7 +103,8 @@ export type DocumentQualityFlag =
   | "LOW_QUALITY"
   | "TABLE_SPANS_PAGES"
   | "UNKNOWN_TEMPLATE"
-  | "MISSING_FIELDS";
+  | "MISSING_FIELDS"
+  | "SPREADSHEET";
 
 export interface ExtractionMeta {
   di_model_version?: string | null;

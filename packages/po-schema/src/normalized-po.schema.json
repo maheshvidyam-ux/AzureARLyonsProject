@@ -141,7 +141,7 @@
         },
         "document_quality_flags": {
           "type": "array",
-          "items": { "type": "string", "enum": ["SCANNED", "ROTATED", "LOW_QUALITY", "TABLE_SPANS_PAGES", "UNKNOWN_TEMPLATE", "MISSING_FIELDS"] }
+          "items": { "type": "string", "enum": ["SCANNED", "ROTATED", "LOW_QUALITY", "TABLE_SPANS_PAGES", "UNKNOWN_TEMPLATE", "MISSING_FIELDS", "SPREADSHEET"] }
         }
       }
     },

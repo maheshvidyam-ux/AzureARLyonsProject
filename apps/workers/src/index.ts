@@ -12,7 +12,7 @@ import { createPool, fabricSqlConfigFromEnv, FabricSqlPersistence } from "@coa/p
 import { createServiceBusIngestionQueue } from "@coa/messaging";
 import { createFabricLakehouseReader, type MasterDataReader } from "@coa/fabric-read";
 import { createAzureBlobStore } from "./storage/azure-blob-store.js";
-import { createAzureDocumentIntelligenceClient } from "./extraction/index.js";
+import { createAzureDocumentIntelligenceClient, createDefaultExcelExtractor, RoutingExtractor } from "./extraction/index.js";
 import { createAzureFoundryClient } from "./interpretation/index.js";
 import { createDefaultGraphApiClient, IngestionWorker, runIngestionConsumer } from "./ingestion/index.js";
 import type { PipelineDeps } from "./pipeline/index.js";
@@ -28,7 +28,12 @@ async function main(): Promise<void> {
 
   const blob = createAzureBlobStore();
   const persistence = new FabricSqlPersistence(await createPool(fabricSqlConfigFromEnv()));
-  const di = createAzureDocumentIntelligenceClient({ resolveBytes: (ref) => blob.download(ref) });
+  const resolveBytes = (ref: Parameters<typeof blob.download>[0]) => blob.download(ref);
+  // Route by file type: PDF/image → Document Intelligence, Excel/CSV → spreadsheet extractor.
+  const di = new RoutingExtractor({
+    di: createAzureDocumentIntelligenceClient({ resolveBytes }),
+    excel: createDefaultExcelExtractor({ resolveBytes }),
+  });
   const foundry = createAzureFoundryClient();
 
   // Master matching + the atomic duplicate claim turn on when the Fabric Lakehouse masters are

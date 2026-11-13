@@ -153,4 +153,25 @@ export const FOUNDRY_RESPONSES: Record<string, FoundryFixture> = {
     promptVersion: "invoice-interpret-2026.11.1",
     malformedRaw: '{"company":{"company_id":"USMF"},"header":{"invoice_number":{"value":"INV-BAD"',
   },
+
+  // --- customer PO sent as Excel (routed through the spreadsheet extractor) ---
+  "sample-po-xl-001": {
+    deployment: "gpt-4o-po-interpret",
+    promptVersion: "po-interpret-2026.11.1",
+    draft: {
+      company: { company_id: "USMF", resolved_from: "document" },
+      header: {
+        customer: { name: { value: "Acme Industrial Supply" }, erp_customer_account: { value: null }, match_status: "UNMATCHED" },
+        customer_po_number: { value: "PO-XL-7788" },
+        po_date: { value: "2026-11-04" },
+        currency: { value: "USD" },
+        totals: { subtotal: { amount: 1250, currency: "USD" }, tax: { amount: 0, currency: "USD" }, grand_total: { amount: 1250, currency: "USD" } },
+      },
+      lines: [
+        { customer_item_code: { value: "ACM-778" }, description: { value: "1/2in Hex Bolt" }, quantity: { value: 500 }, uom: { value: "EA" }, unit_price: { value: 1.5 }, extended_amount: { value: 750 }, match_status: "UNMATCHED" },
+        { customer_item_code: { value: "ACM-902" }, description: { value: "Flat Washer" }, quantity: { value: 1000 }, uom: { value: "EA" }, unit_price: { value: 0.5 }, extended_amount: { value: 500 }, match_status: "UNMATCHED" },
+      ],
+      overall_confidence: 0.9,
+    },
+  },
 };
