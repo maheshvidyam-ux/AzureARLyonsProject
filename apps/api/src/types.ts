@@ -11,6 +11,7 @@ export interface GraphNotificationSink {
 
 import type { Persistence } from "@coa/persistence";
 import type { Authenticator } from "./auth.js";
+import type { UploadProcessor } from "./upload.js";
 
 export interface ServerDeps {
   /** Secret set on the Graph subscription; notifications must echo it (spec §3). */
@@ -18,7 +19,9 @@ export interface ServerDeps {
   graph: GraphNotificationSink;
   /** When provided, the reviewer workbench routes (/orders) are registered. */
   persistence?: Persistence;
-  /** Authenticator for the reviewer routes (defaults to the DEV header authenticator). */
+  /** When provided, the manual upload route (POST /uploads) is registered. */
+  uploads?: UploadProcessor;
+  /** Authenticator for the reviewer + upload routes (defaults to the DEV header authenticator). */
   authenticate?: Authenticator;
   /** Fastify logger option (false in tests). */
   logger?: boolean;
