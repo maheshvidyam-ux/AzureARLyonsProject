@@ -177,6 +177,12 @@ export interface ConnectionsConfig {
     dataAreaColumn: string;
     itemIdColumn: string;
     itemSkuColumn: string;
+    vendorTable: string;
+    vendorAccountColumn: string;
+    vendorNameColumn: string;
+    poTable: string;
+    poNumberColumn: string;
+    poVendorColumn: string;
   };
   ai: { docIntelEndpoint: string; foundryEndpoint: string; foundryDeployment: string };
 }

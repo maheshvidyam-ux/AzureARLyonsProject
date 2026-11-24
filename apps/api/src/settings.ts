@@ -16,6 +16,7 @@ export interface ConnectionsConfig {
     enabled: boolean;
     server: string;
     database: string;
+    // AR customer/item masters
     customerTable: string;
     itemTable: string;
     customerAccountColumn: string;
@@ -23,6 +24,13 @@ export interface ConnectionsConfig {
     dataAreaColumn: string;
     itemIdColumn: string;
     itemSkuColumn: string;
+    // AP vendor master + purchase orders (used to validate invoices + resolve POs)
+    vendorTable: string;
+    vendorAccountColumn: string;
+    vendorNameColumn: string;
+    poTable: string;
+    poNumberColumn: string;
+    poVendorColumn: string;
   };
   ai: { docIntelEndpoint: string; foundryEndpoint: string; foundryDeployment: string };
 }
@@ -43,6 +51,12 @@ export function defaultConnectionsFromEnv(): ConnectionsConfig {
       dataAreaColumn: "dataareaid",
       itemIdColumn: "itemid",
       itemSkuColumn: "itemid",
+      vendorTable: "gold.ax_vendmaster",
+      vendorAccountColumn: "vendaccount",
+      vendorNameColumn: "name",
+      poTable: "gold.ax_purchline",
+      poNumberColumn: "purchid",
+      poVendorColumn: "orderaccount",
     },
     ai: { docIntelEndpoint: env("DOC_INTEL_ENDPOINT"), foundryEndpoint: env("AI_FOUNDRY_ENDPOINT"), foundryDeployment: env("AI_FOUNDRY_DEPLOYMENT") },
   };

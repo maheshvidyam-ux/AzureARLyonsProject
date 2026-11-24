@@ -22,6 +22,21 @@ export function normalizePoNumber(raw: string | null | undefined): string | null
 }
 
 /**
+ * Canonical PO number for CROSS-DOCUMENT matching (AP invoice → purchase order). Our POs are
+ * issued as "PO-<digits>", but a vendor frequently prints only the digits on their invoice. So
+ * this drops a leading "PO" prefix that is immediately followed by a digit, on top of the normal
+ * normalization — making "PO-100045", "PO100045" and "100045" all canonicalize to "100045".
+ *
+ * The "(?=\\d)" guard means a PO whose own id starts with letters (e.g. "POLY-7") is left intact.
+ */
+export function canonicalPoNumber(raw: string | null | undefined): string | null {
+  const n = normalizePoNumber(raw);
+  if (!n) return null;
+  const stripped = n.replace(/^PO(?=\d)/, "");
+  return stripped.length > 0 ? stripped : n;
+}
+
+/**
  * The duplicate business key (spec §8, docs/03 §Consistency & keys):
  *   normalized_po_number + erp_customer_account + company_id
  * Returned here as a stable string for logging/record-keeping. The *atomic* claim itself

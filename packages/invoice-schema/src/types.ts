@@ -13,7 +13,7 @@ import type { Field, Money, ValidationFinding } from "@coa/po-schema";
 export const INVOICE_SCHEMA_VERSION = "1.0.0";
 
 export type InvoiceType = "PO_BASED" | "NON_PO";
-export type VendorMatchStatus = "EXACT" | "CROSS_REF" | "ALIAS" | "ADDRESS" | "TAX_ID" | "FUZZY" | "UNMATCHED";
+export type VendorMatchStatus = "EXACT" | "CROSS_REF" | "ALIAS" | "ADDRESS" | "TAX_ID" | "FUZZY" | "PO_DERIVED" | "UNMATCHED";
 export type InvoiceLineMatchStatus = "PO_MATCHED" | "QTY_VARIANCE" | "PRICE_VARIANCE" | "OVER_RECEIPT" | "NO_PO_LINE" | "GL_CODE_REQUIRED" | "UNMATCHED";
 
 export interface InvoiceVendor {

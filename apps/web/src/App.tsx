@@ -5,6 +5,7 @@
  */
 import { useCallback, useState } from "react";
 import { useAuth, SELECTABLE_ROLES } from "./auth/AuthContext.js";
+import { Dashboard } from "./views/Dashboard.js";
 import { Queue } from "./views/Queue.js";
 import { OrderDetail } from "./views/OrderDetail.js";
 import { InvoiceQueue } from "./views/InvoiceQueue.js";
@@ -14,6 +15,7 @@ import { useToast, ToastHost } from "./components/Toast.js";
 import type { AppRole } from "./api/contract.js";
 
 type Route =
+  | { name: "dashboard" }
   | { name: "queue" }
   | { name: "detail"; id: string; po: string }
   | { name: "invoices" }
@@ -22,9 +24,10 @@ type Route =
 
 export function App(): JSX.Element {
   const { role, setRole } = useAuth();
-  const [route, setRoute] = useState<Route>({ name: "queue" });
+  const [route, setRoute] = useState<Route>({ name: "dashboard" });
   const { toast, notify } = useToast();
 
+  const goDashboard = useCallback(() => setRoute({ name: "dashboard" }), []);
   const openOrder = useCallback((id: string, po: string) => setRoute({ name: "detail", id, po }), []);
   const backToQueue = useCallback(() => setRoute({ name: "queue" }), []);
   const openInvoice = useCallback((id: string, label: string) => setRoute({ name: "invoice", id, label }), []);
@@ -35,6 +38,12 @@ export function App(): JSX.Element {
     <div className="app">
       <nav className="side" aria-label="Primary">
         <div className="logo">OA</div>
+        <button className="navi" aria-current={route.name === "dashboard"} title="Dashboard" onClick={goDashboard}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <rect x="3" y="3" width="7" height="9" rx="1" /><rect x="14" y="3" width="7" height="5" rx="1" />
+            <rect x="14" y="12" width="7" height="9" rx="1" /><rect x="3" y="16" width="7" height="5" rx="1" />
+          </svg>
+        </button>
         <button className="navi" aria-current={route.name === "queue" || route.name === "detail"} title="Customer orders (AR)" onClick={backToQueue}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" />
@@ -59,6 +68,7 @@ export function App(): JSX.Element {
       <div className="mainwrap">
         <header className="top">
           <div className="crumbs">
+            {route.name === "dashboard" && <span className="cur">Dashboard</span>}
             {route.name === "queue" && <span className="cur">Customer orders</span>}
             {route.name === "invoices" && <span className="cur">Vendor invoices</span>}
             {route.name === "settings" && <span className="cur">Connections</span>}
@@ -92,6 +102,7 @@ export function App(): JSX.Element {
         </header>
 
         <div className={isDetail ? "view view-detail" : "view"}>
+          {route.name === "dashboard" && <Dashboard onGoOrders={backToQueue} onGoInvoices={backToInvoices} />}
           {route.name === "queue" && <Queue onOpen={openOrder} />}
           {route.name === "invoices" && <InvoiceQueue onOpen={openInvoice} />}
           {route.name === "settings" && <Settings notify={notify} />}

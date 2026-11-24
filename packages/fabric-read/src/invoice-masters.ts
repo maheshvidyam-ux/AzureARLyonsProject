@@ -5,6 +5,8 @@
  * `gold.ax_purchline`, `gold.ax_packingslip`/receipts — exact tables Q-FAB-1); an in-memory
  * reader backs tests, the real Lakehouse reader is a follow-up.
  */
+import { canonicalPoNumber } from "@coa/domain";
+
 export interface VendorMaster {
   erpVendorAccount: string;
   companyId: string;
@@ -38,6 +40,11 @@ export interface InvoiceMasterReader {
   findVendors(companyId: string): Promise<VendorMaster[]>;
   findPoLines(companyId: string, poNumber: string): Promise<PoLine[]>;
   findReceipts(companyId: string, poNumber: string): Promise<GoodsReceipt[]>;
+  /** All PO lines for a vendor — the primary path (match the vendor, then search its POs). */
+  findPoLinesForVendor(companyId: string, erpVendorAccount: string): Promise<PoLine[]>;
+  /** PO lines whose PO number canonically matches, across vendors — the fallback when the vendor
+   *  is unmatched; the PO's own vendor is then used. Prefix-tolerant ("PO-100045" ↔ "100045"). */
+  findPoLinesByPoNumber(companyId: string, canonicalPo: string): Promise<PoLine[]>;
 }
 
 export interface InMemoryInvoiceMastersOptions {
@@ -63,5 +70,11 @@ export class InMemoryInvoiceMasterReader implements InvoiceMasterReader {
   }
   async findReceipts(companyId: string, poNumber: string): Promise<GoodsReceipt[]> {
     return this.receipts.filter((r) => r.companyId === companyId && r.poNumber === poNumber);
+  }
+  async findPoLinesForVendor(companyId: string, erpVendorAccount: string): Promise<PoLine[]> {
+    return this.poLines.filter((l) => l.companyId === companyId && l.erpVendorAccount === erpVendorAccount);
+  }
+  async findPoLinesByPoNumber(companyId: string, canonicalPo: string): Promise<PoLine[]> {
+    return this.poLines.filter((l) => l.companyId === companyId && canonicalPoNumber(l.poNumber) === canonicalPo);
   }
 }

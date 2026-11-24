@@ -4,19 +4,19 @@
  * unmatched → review; malformed AI → controlled FAILED. All on quarantined mocks.
  */
 import { describe, expect, it } from "vitest";
-import { InMemoryInvoiceMasterReader, type GoodsReceipt } from "@coa/fabric-read";
+import { InMemoryInvoiceMasterReader, type GoodsReceipt, type PoLine } from "@coa/fabric-read";
 import { InMemoryBlobStore } from "../../mocks/blob/in-memory-blob.js";
 import { MockDocumentIntelligenceClient, MockFoundryClient } from "../../mocks/ai/mock-ai-clients.js";
 import { SAMPLE_VENDORS, SAMPLE_PO_LINES, SAMPLE_RECEIPTS } from "../../mocks/fabric/sample-invoice-masters.js";
 import { InMemoryInvoiceDedup, processInvoice, type InvoicePipelineDeps } from "../../apps/workers/src/invoice/index.js";
 import type { GraphMailMessage } from "../../apps/workers/src/pipeline/ports.js";
 
-function deps(over?: { receipts?: GoodsReceipt[]; vendors?: typeof SAMPLE_VENDORS; dedup?: InMemoryInvoiceDedup }): InvoicePipelineDeps {
+function deps(over?: { receipts?: GoodsReceipt[]; vendors?: typeof SAMPLE_VENDORS; poLines?: PoLine[]; dedup?: InMemoryInvoiceDedup }): InvoicePipelineDeps {
   return {
     blob: new InMemoryBlobStore(),
     di: new MockDocumentIntelligenceClient(),
     foundry: new MockFoundryClient(),
-    masters: new InMemoryInvoiceMasterReader({ vendors: over?.vendors ?? SAMPLE_VENDORS, poLines: SAMPLE_PO_LINES, receipts: over?.receipts ?? SAMPLE_RECEIPTS }),
+    masters: new InMemoryInvoiceMasterReader({ vendors: over?.vendors ?? SAMPLE_VENDORS, poLines: over?.poLines ?? SAMPLE_PO_LINES, receipts: over?.receipts ?? SAMPLE_RECEIPTS }),
     dedup: over?.dedup ?? new InMemoryInvoiceDedup(),
   };
 }
@@ -62,8 +62,9 @@ describe("AP invoice pipeline", () => {
     expect(second.findings.some((f) => f.code === "DUPLICATE_INVOICE")).toBe(true);
   });
 
-  it("vendor not matched → VENDOR_UNMATCHED, NEEDS_REVIEW", async () => {
-    const r = await processInvoice(deps({ vendors: [] }), mail("sample-inv-po-001", "a"), 0);
+  it("vendor not matched AND no PO to fall back on → VENDOR_UNMATCHED, NEEDS_REVIEW", async () => {
+    // Empty vendor master + empty PO table: neither name match nor PO lookup can resolve the vendor.
+    const r = await processInvoice(deps({ vendors: [], poLines: [] }), mail("sample-inv-po-001", "a"), 0);
     expect(r.internalState).toBe("NEEDS_REVIEW");
     expect(r.findings.some((f) => f.code === "VENDOR_UNMATCHED" && f.blocking)).toBe(true);
   });

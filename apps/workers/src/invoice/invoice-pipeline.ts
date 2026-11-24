@@ -15,6 +15,7 @@ import { matchVendor, threeWayMatchLine } from "@coa/matching";
 import { decodeAttachmentBytes } from "../pipeline/ingestion.js";
 import type { BlobRef, BlobStore, DocumentIntelligenceClient, FoundryClient, GraphMailMessage } from "../pipeline/ports.js";
 import { normalizeInvoice } from "./invoice-normalize.js";
+import { resolvePurchaseOrder } from "./po-resolution.js";
 
 /** Atomic invoice-dedup claim (maps to the shared filtered-unique-index claim in production). */
 export interface InvoiceDedup {
@@ -120,8 +121,37 @@ export async function processInvoice(deps: InvoicePipelineDeps, message: GraphMa
   if (!vm.erpVendorAccount) findings.push(err("VENDOR_UNMATCHED", "header.vendor", `Vendor not matched (${vm.evidence}).`));
   trace.push(`VENDOR ${vm.matchStatus}(${vm.erpVendorAccount ?? "∅"})`);
 
-  // Invoice dedup.
-  const businessKey = invoiceBusinessKey({ companyId, erpVendorAccount: vm.erpVendorAccount, normalizedInvoiceNumber: inv.header.normalized_invoice_number ?? null });
+  // Matching: 3-way for PO_BASED; Code & Approve for NON_PO.
+  // PO resolution is vendor-first and prefix-tolerant: match the vendor, search ITS POs for the
+  // (canonical) PO number; if the vendor is unmatched, look the PO up across vendors and adopt its
+  // vendor. So an invoice that drops the "PO-" prefix, or whose vendor name is unreadable, still ties
+  // to the right PO.
+  if (inv.invoice_type === "PO_BASED") {
+    const po = await resolvePurchaseOrder(deps.masters, { companyId, erpVendorAccount: vm.erpVendorAccount, poNumberRaw: inv.header.po_number?.value ?? null });
+    if (!vm.erpVendorAccount && po.erpVendorAccount) {
+      inv.header.vendor = { ...(inv.header.vendor ?? {}), erp_vendor_account: { value: po.erpVendorAccount, confidence: 0.8 }, match_status: "PO_DERIVED" };
+      const ix = findings.findIndex((f) => f.code === "VENDOR_UNMATCHED");
+      if (ix >= 0) findings.splice(ix, 1);
+      findings.push(warn("VENDOR_RESOLVED_FROM_PO", "header.vendor", `Vendor unmatched by name but resolved from PO ${po.poNumber} → ${po.erpVendorAccount}.`));
+      trace.push(`VENDOR derived from PO ${po.poNumber} → ${po.erpVendorAccount}`);
+    }
+    const receipts = po.poNumber ? await deps.masters.findReceipts(companyId, po.poNumber) : [];
+    inv.lines.forEach((line, i) => {
+      const m = threeWayMatchLine({ poLineRef: line.po_line_ref?.value ?? null, erpItemId: line.erp_item_id?.value ?? null, quantity: line.quantity?.value ?? null, unitPrice: line.unit_price?.value ?? null }, po.poLines, receipts);
+      line.match_status = m.status;
+      line.erp_item_id = { value: m.erpItemId };
+      if (m.status !== "PO_MATCHED") findings.push(err(`THREEWAY_${m.status}`, `lines[${i}]`, `Line ${i + 1}: ${m.detail}`));
+    });
+    trace.push(`3WAY via=${po.via} po=${po.poNumber ?? "∅"} ${inv.lines.map((l) => l.match_status).join(",")}`);
+  } else {
+    // Non-PO: the C&A line must be GL-coded + approved by a CSR.
+    findings.push(err("GL_CODE_REQUIRED", "lines[0].gl_account", "Non-PO invoice — reviewer must assign a GL account and approve (Code & Approve)."));
+    trace.push("NON_PO → Code & Approve (reviewer)");
+  }
+
+  // Invoice dedup — keyed on the FINAL vendor account (incl. one derived from the PO above).
+  const erpVendorAccount = inv.header.vendor?.erp_vendor_account?.value ?? null;
+  const businessKey = invoiceBusinessKey({ companyId, erpVendorAccount, normalizedInvoiceNumber: inv.header.normalized_invoice_number ?? null });
   let duplicate = false;
   if (businessKey) {
     const claim = await deps.dedup.claim(businessKey, documentId);
@@ -130,23 +160,6 @@ export async function processInvoice(deps: InvoicePipelineDeps, message: GraphMa
       findings.push(err("DUPLICATE_INVOICE", null, `Duplicate invoice — ${businessKey} already seen.`));
       trace.push("DUPLICATE invoice");
     } else trace.push("CLAIMED invoice key");
-  }
-
-  // Matching: 3-way for PO_BASED; Code & Approve for NON_PO.
-  if (inv.invoice_type === "PO_BASED") {
-    const poNumber = inv.header.po_number?.value ?? "";
-    const [poLines, receipts] = await Promise.all([deps.masters.findPoLines(companyId, poNumber), deps.masters.findReceipts(companyId, poNumber)]);
-    inv.lines.forEach((line, i) => {
-      const m = threeWayMatchLine({ poLineRef: line.po_line_ref?.value ?? null, erpItemId: line.erp_item_id?.value ?? null, quantity: line.quantity?.value ?? null, unitPrice: line.unit_price?.value ?? null }, poLines, receipts);
-      line.match_status = m.status;
-      line.erp_item_id = { value: m.erpItemId };
-      if (m.status !== "PO_MATCHED") findings.push(err(`THREEWAY_${m.status}`, `lines[${i}]`, `Line ${i + 1}: ${m.detail}`));
-    });
-    trace.push(`3WAY ${inv.lines.map((l) => l.match_status).join(",")}`);
-  } else {
-    // Non-PO: the C&A line must be GL-coded + approved by a CSR.
-    findings.push(err("GL_CODE_REQUIRED", "lines[0].gl_account", "Non-PO invoice — reviewer must assign a GL account and approve (Code & Approve)."));
-    trace.push("NON_PO → Code & Approve (reviewer)");
   }
 
   inv.validation = findings;

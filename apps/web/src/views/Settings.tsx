@@ -108,6 +108,19 @@ export function Settings({ notify }: { notify: Notify }): JSX.Element {
           </div>
         </Section>
 
+        <Section title="ERP vendor master + purchase orders (AP)" sub="Used to validate vendor invoices: match the vendor, then search that vendor's POs. PO numbers are matched prefix-tolerantly (invoices often drop the 'PO-')." test={tests.lakehouse} onTest={() => void runTest("lakehouse")}>
+          <div className="twocol">
+            <Field label="Vendor master table" value={form.lakehouse.vendorTable} onChange={(v) => setLake({ vendorTable: v })} />
+            <Field label="Vendor account column" value={form.lakehouse.vendorAccountColumn} onChange={(v) => setLake({ vendorAccountColumn: v })} />
+            <Field label="Vendor name column" value={form.lakehouse.vendorNameColumn} onChange={(v) => setLake({ vendorNameColumn: v })} />
+            <div />
+            <Field label="Purchase order table" value={form.lakehouse.poTable} onChange={(v) => setLake({ poTable: v })} />
+            <div />
+            <Field label="PO number column (searched)" value={form.lakehouse.poNumberColumn} onChange={(v) => setLake({ poNumberColumn: v })} />
+            <Field label="PO vendor-account column (searched)" value={form.lakehouse.poVendorColumn} onChange={(v) => setLake({ poVendorColumn: v })} />
+          </div>
+        </Section>
+
         <Section title="AI services" sub="Document Intelligence + AI Foundry endpoints (Entra-authenticated).">
           <Field label="Document Intelligence endpoint" value={form.ai.docIntelEndpoint} onChange={(v) => setAi({ docIntelEndpoint: v })} />
           <div className="twocol">
