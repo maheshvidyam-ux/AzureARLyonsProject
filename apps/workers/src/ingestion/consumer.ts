@@ -5,9 +5,13 @@
  * which auto-completes the Service Bus message.
  */
 import type { IngestionProcessor, IngestionSubscription } from "@coa/messaging";
-import type { IngestionWorker } from "./ingestion-worker.js";
 
-export function runIngestionConsumer(processor: IngestionProcessor, worker: IngestionWorker): IngestionSubscription {
+/** Either ingestion worker (AR order or AP invoice) satisfies this — only the outcome's error matters here. */
+export interface MessageHandler {
+  handleMessageId(messageId: string, mailbox?: string): Promise<{ error?: string }>;
+}
+
+export function runIngestionConsumer(processor: IngestionProcessor, worker: MessageHandler): IngestionSubscription {
   return processor.subscribe(async (message) => {
     const outcome = await worker.handleMessageId(message.messageId, message.mailbox);
     if (outcome.error) {
