@@ -389,6 +389,87 @@ export interface StagedVendorInvoiceRow {
   axVoucherId: string | null;
 }
 
+// --- AP invoice reviewer workbench (mirrors the AR order reviewer) ---
+export interface InvoiceSummaryRow {
+  id: string;
+  companyId: string;
+  invoiceType: string;
+  erpVendorAccount: string | null;
+  vendorName: string | null;
+  invoiceNumber: string | null;
+  normalizedInvoiceNumber: string | null;
+  poNumber: string | null;
+  grandTotal: number | null;
+  lineCount: number;
+  simpleStatus: string;
+  internalState: string;
+  rowVersion: number;
+}
+export interface InvoiceLineDetail {
+  lineId: string;
+  sourceLineNo: number | null;
+  poLineRef: string | null;
+  erpItemId: string | null;
+  glAccount: string | null;
+  description: string | null;
+  quantity: number | null;
+  uom: string | null;
+  unitPrice: number | null;
+  amount: number | null;
+  matchStatus: string | null;
+  isCodeAndApprove: boolean;
+}
+export interface InvoiceReviewHeader {
+  id: string;
+  companyId: string;
+  invoiceType: string;
+  erpVendorAccount: string | null;
+  vendorName: string | null;
+  invoiceNumber: string | null;
+  normalizedInvoiceNumber: string | null;
+  poNumber: string | null;
+  invoiceDate: string | null;
+  currency: string | null;
+  subtotal: number | null;
+  tax: number | null;
+  grandTotal: number | null;
+  simpleStatus: string;
+  internalState: string;
+  rowVersion: number;
+}
+export interface InvoiceReviewDetail {
+  header: InvoiceReviewHeader;
+  lines: InvoiceLineDetail[];
+  validation: ValidationRow[];
+  normalized: unknown | null;
+}
+export interface ListInvoicesFilter {
+  companyId?: string;
+  internalState?: string;
+  invoiceType?: string;
+  limit?: number;
+}
+export interface InvoiceHeaderPatch {
+  erpVendorAccount?: string | null;
+  invoiceNumber?: string | null;
+  invoiceDate?: string | null;
+  poNumber?: string | null;
+  currency?: string | null;
+}
+export interface InvoiceLinePatch {
+  lineId: string;
+  erpItemId?: string | null;
+  glAccount?: string | null;
+  quantity?: number | null;
+  uom?: string | null;
+  unitPrice?: number | null;
+  amount?: number | null;
+}
+export interface UpdateInvoiceInput {
+  header?: InvoiceHeaderPatch;
+  lines?: InvoiceLinePatch[];
+}
+
 export interface Persistence {
   ingest(input: IngestionInput): Promise<IngestionResult>;
   recordDocument(input: RecordDocumentInput): Promise<RecordDocumentResult>;
@@ -447,6 +528,14 @@ export interface Persistence {
   listVendorInvoicesForBoomi(limit?: number): Promise<StagedVendorInvoiceRow[]>;
   /** Boomi ack: record the AX voucher id (or a failure) and complete the invoice. */
   markVendorInvoiceResult(stagingId: string, result: { axVoucherId?: string; error?: string }): Promise<void>;
+
+  // --- AP invoice reviewer workbench ---
+  listInvoices(filter: ListInvoicesFilter): Promise<InvoiceSummaryRow[]>;
+  getInvoiceForReview(invoiceHeaderId: string): Promise<InvoiceReviewDetail | null>;
+  /** Edit invoice header/line fields (incl. GL coding) with optimistic concurrency; bumps row_version. */
+  updateInvoiceFields(invoiceHeaderId: string, expectedRowVersion: number, patch: UpdateInvoiceInput, actor: string): Promise<OptimisticResult>;
+  /** Approve (→ stage to staging_vendor_invoice) or reject a vendor invoice, with optimistic concurrency. */
+  invoiceReviewDecision(invoiceHeaderId: string, decision: ReviewDecisionKind, expectedRowVersion: number, actor: string): Promise<OptimisticResult>;
 
   getOrderHeaderById(id: string): Promise<OrderHeaderRow | null>;
   getValidationByOrderId(orderHeaderId: string): Promise<ValidationRow[]>;

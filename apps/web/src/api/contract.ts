@@ -84,6 +84,81 @@ export interface UpdateOrderInput {
   lines?: OrderLinePatch[];
 }
 
+// --- AP invoices (mirror packages/persistence InvoiceReview* types) ---
+export interface InvoiceSummaryRow {
+  id: string;
+  companyId: string;
+  invoiceType: string;
+  erpVendorAccount: string | null;
+  vendorName: string | null;
+  invoiceNumber: string | null;
+  normalizedInvoiceNumber: string | null;
+  poNumber: string | null;
+  grandTotal: number | null;
+  lineCount: number;
+  simpleStatus: string;
+  internalState: string;
+  rowVersion: number;
+}
+export interface InvoiceLineDetail {
+  lineId: string;
+  sourceLineNo: number | null;
+  poLineRef: string | null;
+  erpItemId: string | null;
+  glAccount: string | null;
+  description: string | null;
+  quantity: number | null;
+  uom: string | null;
+  unitPrice: number | null;
+  amount: number | null;
+  matchStatus: string | null;
+  isCodeAndApprove: boolean;
+}
+export interface InvoiceReviewHeader {
+  id: string;
+  companyId: string;
+  invoiceType: string;
+  erpVendorAccount: string | null;
+  vendorName: string | null;
+  invoiceNumber: string | null;
+  normalizedInvoiceNumber: string | null;
+  poNumber: string | null;
+  invoiceDate: string | null;
+  currency: string | null;
+  subtotal: number | null;
+  tax: number | null;
+  grandTotal: number | null;
+  simpleStatus: string;
+  internalState: string;
+  rowVersion: number;
+}
+export interface InvoiceReviewDetail {
+  header: InvoiceReviewHeader;
+  lines: InvoiceLineDetail[];
+  validation: ValidationRow[];
+  normalized: unknown | null;
+}
+export interface InvoiceHeaderPatch {
+  erpVendorAccount?: string | null;
+  invoiceNumber?: string | null;
+  invoiceDate?: string | null;
+  poNumber?: string | null;
+  currency?: string | null;
+}
+export interface InvoiceLinePatch {
+  lineId: string;
+  erpItemId?: string | null;
+  glAccount?: string | null;
+  quantity?: number | null;
+  uom?: string | null;
+  unitPrice?: number | null;
+  amount?: number | null;
+}
+export interface UpdateInvoiceInput {
+  header?: InvoiceHeaderPatch;
+  lines?: InvoiceLinePatch[];
+}
+
 /** App roles — mirrors apps/api/src/auth.ts. */
 export type AppRole = "Administrator" | "OrderProcessor" | "Supervisor" | "Viewer" | "IntegrationService";
 export const WRITE_ROLES: AppRole[] = ["OrderProcessor", "Supervisor", "Administrator"];

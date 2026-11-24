@@ -11,6 +11,11 @@ import type {
   DuplicateClaimResult,
   IngestionInput,
   InvoiceLineWrite,
+  InvoiceSummaryRow,
+  InvoiceReviewDetail,
+  InvoiceLineDetail,
+  ListInvoicesFilter,
+  UpdateInvoiceInput,
   SaveInvoiceInput,
   SaveInvoiceResult,
   StagedVendorInvoiceRow,
@@ -97,9 +102,14 @@ interface InvoiceRecord {
   currency: string | null;
   grandTotal: number | null;
   lineCount: number;
+  subtotal: number | null;
+  tax: number | null;
   simpleStatus: string;
   internalState: string;
-  lines: InvoiceLineWrite[];
+  rowVersion: number;
+  lines: Array<InvoiceLineWrite & { lineId: string }>;
+  validation: ValidationRow[];
+  normalized: unknown;
 }
 interface StagingInvoiceRecord extends StagedVendorInvoiceRow {
   lines: InvoiceLineWrite[];
@@ -518,6 +528,12 @@ export class InMemoryPersistence implements Persistence {
     const existing = this.invoiceByHash.get(input.sourceHash);
     if (existing) return { invoiceHeaderId: existing.id, created: false };
     const id = randomUUID();
+    let normalized: unknown = null;
+    try {
+      normalized = JSON.parse(input.extraction.normalizedJson);
+    } catch {
+      normalized = null;
+    }
     this.invoiceByHash.set(input.sourceHash, {
       id,
       sourceHash: input.sourceHash,
@@ -530,11 +546,16 @@ export class InMemoryPersistence implements Persistence {
       poNumber: input.header.poNumber,
       invoiceDate: input.header.invoiceDate,
       currency: input.header.currency,
+      subtotal: input.header.subtotal,
+      tax: input.header.tax,
       grandTotal: input.header.grandTotal,
       lineCount: input.header.lineCount,
       simpleStatus: input.header.simpleStatus,
       internalState: input.header.internalState,
-      lines: input.lines.map((l) => ({ ...l })),
+      rowVersion: 0,
+      lines: input.lines.map((l) => ({ ...l, lineId: randomUUID() })),
+      validation: input.validation.map((v) => ({ code: v.code, severity: v.severity, blocking: v.blocking, fieldPath: v.fieldPath, message: v.message })),
+      normalized,
     });
     return { invoiceHeaderId: id, created: true };
   }
@@ -606,6 +627,110 @@ export class InMemoryPersistence implements Persistence {
       }
       return;
     }
+  }
+
+  async listInvoices(filter: ListInvoicesFilter): Promise<InvoiceSummaryRow[]> {
+    let rows = [...this.invoiceByHash.values()];
+    if (filter.companyId) rows = rows.filter((i) => i.companyId === filter.companyId);
+    if (filter.internalState) rows = rows.filter((i) => i.internalState === filter.internalState);
+    if (filter.invoiceType) rows = rows.filter((i) => i.invoiceType === filter.invoiceType);
+    return rows.slice(0, filter.limit ?? 100).map((i) => ({
+      id: i.id,
+      companyId: i.companyId,
+      invoiceType: i.invoiceType,
+      erpVendorAccount: i.erpVendorAccount,
+      vendorName: i.vendorName,
+      invoiceNumber: i.invoiceNumber,
+      normalizedInvoiceNumber: i.normalizedInvoiceNumber,
+      poNumber: i.poNumber,
+      grandTotal: i.grandTotal,
+      lineCount: i.lineCount,
+      simpleStatus: i.simpleStatus,
+      internalState: i.internalState,
+      rowVersion: i.rowVersion,
+    }));
+  }
+
+  async getInvoiceForReview(invoiceHeaderId: string): Promise<InvoiceReviewDetail | null> {
+    const i = this.findInvoice(invoiceHeaderId);
+    if (!i) return null;
+    const lines: InvoiceLineDetail[] = i.lines.map((l) => ({
+      lineId: l.lineId,
+      sourceLineNo: l.sourceLineNo,
+      poLineRef: l.poLineRef,
+      erpItemId: l.erpItemId,
+      glAccount: l.glAccount,
+      description: l.description,
+      quantity: l.quantity,
+      uom: l.uom,
+      unitPrice: l.unitPrice,
+      amount: l.amount,
+      matchStatus: l.matchStatus,
+      isCodeAndApprove: l.isCodeAndApprove,
+    }));
+    return {
+      header: {
+        id: i.id,
+        companyId: i.companyId,
+        invoiceType: i.invoiceType,
+        erpVendorAccount: i.erpVendorAccount,
+        vendorName: i.vendorName,
+        invoiceNumber: i.invoiceNumber,
+        normalizedInvoiceNumber: i.normalizedInvoiceNumber,
+        poNumber: i.poNumber,
+        invoiceDate: i.invoiceDate,
+        currency: i.currency,
+        subtotal: i.subtotal,
+        tax: i.tax,
+        grandTotal: i.grandTotal,
+        simpleStatus: i.simpleStatus,
+        internalState: i.internalState,
+        rowVersion: i.rowVersion,
+      },
+      lines,
+      validation: i.validation.map((v) => ({ ...v })),
+      normalized: i.normalized,
+    };
+  }
+
+  async updateInvoiceFields(invoiceHeaderId: string, expectedRowVersion: number, patch: UpdateInvoiceInput, _actor: string): Promise<OptimisticResult> {
+    const i = this.findInvoice(invoiceHeaderId);
+    if (!i) return { status: "NOT_FOUND" };
+    if (i.rowVersion !== expectedRowVersion) return { status: "CONFLICT", rowVersion: i.rowVersion };
+    if (patch.header) {
+      const p = patch.header;
+      if (p.erpVendorAccount !== undefined) i.erpVendorAccount = p.erpVendorAccount;
+      if (p.invoiceNumber !== undefined) i.invoiceNumber = p.invoiceNumber;
+      if (p.invoiceDate !== undefined) i.invoiceDate = p.invoiceDate;
+      if (p.poNumber !== undefined) i.poNumber = p.poNumber;
+      if (p.currency !== undefined) i.currency = p.currency;
+    }
+    for (const lp of patch.lines ?? []) {
+      const line = i.lines.find((l) => l.lineId === lp.lineId);
+      if (!line) continue;
+      if (lp.erpItemId !== undefined) line.erpItemId = lp.erpItemId;
+      if (lp.glAccount !== undefined) line.glAccount = lp.glAccount;
+      if (lp.quantity !== undefined) line.quantity = lp.quantity;
+      if (lp.uom !== undefined) line.uom = lp.uom;
+      if (lp.unitPrice !== undefined) line.unitPrice = lp.unitPrice;
+      if (lp.amount !== undefined) line.amount = lp.amount;
+    }
+    i.rowVersion += 1;
+    return { status: "OK", rowVersion: i.rowVersion };
+  }
+
+  async invoiceReviewDecision(invoiceHeaderId: string, decision: ReviewDecisionKind, expectedRowVersion: number, _actor: string): Promise<OptimisticResult> {
+    const i = this.findInvoice(invoiceHeaderId);
+    if (!i) return { status: "NOT_FOUND" };
+    if (i.rowVersion !== expectedRowVersion) return { status: "CONFLICT", rowVersion: i.rowVersion };
+    if (decision === "APPROVE") {
+      await this.stageInvoice(invoiceHeaderId); // → STAGED, written to staging_vendor_invoice
+    } else {
+      i.internalState = "REJECTED";
+      i.simpleStatus = "Rejected";
+    }
+    i.rowVersion += 1;
+    return { status: "OK", rowVersion: i.rowVersion };
   }
 
   async close(): Promise<void> {

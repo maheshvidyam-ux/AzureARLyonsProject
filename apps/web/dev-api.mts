@@ -9,13 +9,15 @@
  *   npm --workspace @coa/web run dev         # the SPA, :5173  (proxies /api → :5174)
  */
 import { InMemoryPersistence } from "@coa/persistence";
-import { InMemoryMasterDataReader, LearningAugmentedMasterReader, aliasOverlayFromRows } from "@coa/fabric-read";
+import { InMemoryMasterDataReader, LearningAugmentedMasterReader, aliasOverlayFromRows, InMemoryInvoiceMasterReader } from "@coa/fabric-read";
 import { buildServer } from "../api/src/server.js";
 import { processAttachment, type PipelineDeps } from "../workers/src/pipeline/pipeline.js";
+import { InMemoryInvoiceDedup, processInvoice, type InvoicePipelineDeps } from "../workers/src/invoice/index.js";
 import type { GraphMailMessage } from "../workers/src/pipeline/ports.js";
 import { InMemoryBlobStore } from "../../mocks/blob/in-memory-blob.js";
 import { MockDocumentIntelligenceClient, MockFoundryClient } from "../../mocks/ai/mock-ai-clients.js";
 import { SAMPLE_CUSTOMERS, SAMPLE_ITEMS } from "../../mocks/fabric/sample-masters.js";
+import { SAMPLE_VENDORS, SAMPLE_PO_LINES, SAMPLE_RECEIPTS } from "../../mocks/fabric/sample-invoice-masters.js";
 
 const PORT = 5174;
 
@@ -59,6 +61,28 @@ async function main(): Promise<void> {
     }
   }
   console.log(`seeded ${await persistence.countOrders()} orders`);
+
+  // Seed AP vendor invoices through the real invoice pipeline (PO-based 3-way + Non-PO C&A).
+  const invoiceDeps: InvoicePipelineDeps = {
+    blob: new InMemoryBlobStore(),
+    di: new MockDocumentIntelligenceClient(),
+    foundry: new MockFoundryClient(),
+    masters: new InMemoryInvoiceMasterReader({ vendors: SAMPLE_VENDORS, poLines: SAMPLE_PO_LINES, receipts: SAMPLE_RECEIPTS }),
+    dedup: new InMemoryInvoiceDedup(),
+    persistence,
+  };
+  const invoiceSeeds: Array<[stem: string, id: string]> = [
+    ["sample-inv-po-001", "inv-po-001"], // PO-based clean 3-way → READY
+    ["sample-inv-nonpo-001", "inv-np-001"], // Non-PO → NEEDS_REVIEW (Code & Approve / GL coding)
+  ];
+  for (const [stem, id] of invoiceSeeds) {
+    try {
+      await processInvoice(invoiceDeps, mail(stem, id, "ap@acme.example.com"), 0);
+    } catch (err) {
+      console.error(`invoice seed ${stem} failed:`, err instanceof Error ? err.message : err);
+    }
+  }
+  console.log(`seeded ${(await persistence.listInvoices({})).length} invoices`);
 
   const app = await buildServer({
     graphClientState: "dev",

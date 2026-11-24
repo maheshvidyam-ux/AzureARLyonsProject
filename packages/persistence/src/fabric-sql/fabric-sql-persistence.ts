@@ -15,6 +15,11 @@ import type {
   DuplicateClaimResult,
   IngestionInput,
   SaveInvoiceInput,
+  InvoiceSummaryRow,
+  InvoiceReviewDetail,
+  InvoiceLineDetail,
+  ListInvoicesFilter,
+  UpdateInvoiceInput,
   SaveInvoiceResult,
   StagedVendorInvoiceRow,
   IngestionResult,
@@ -957,6 +962,183 @@ export class FabricSqlPersistence implements Persistence {
       await safeRollback(tx);
       throw e;
     }
+  }
+
+  async listInvoices(filter: ListInvoicesFilter): Promise<InvoiceSummaryRow[]> {
+    const top = Math.max(1, Math.min(filter.limit ?? 100, 1000));
+    const r = await this.pool
+      .request()
+      .input("company", sql.VarChar(20), filter.companyId ?? null)
+      .input("state", sql.VarChar(20), filter.internalState ?? null)
+      .input("type", sql.VarChar(10), filter.invoiceType ?? null)
+      .query(
+        `SELECT TOP (${top}) id, company_id, invoice_type, erp_vendor_account, vendor_name, invoice_number,
+                normalized_invoice_number, po_number, grand_total, line_count, simple_status, internal_state, row_version
+           FROM dbo.ap_invoice_header
+          WHERE (@company IS NULL OR company_id=@company) AND (@state IS NULL OR internal_state=@state)
+                AND (@type IS NULL OR invoice_type=@type)
+          ORDER BY created_at DESC`,
+      );
+    return r.recordset.map((row) => ({
+      id: String(row.id),
+      companyId: row.company_id,
+      invoiceType: row.invoice_type,
+      erpVendorAccount: row.erp_vendor_account,
+      vendorName: row.vendor_name,
+      invoiceNumber: row.invoice_number,
+      normalizedInvoiceNumber: row.normalized_invoice_number,
+      poNumber: row.po_number,
+      grandTotal: row.grand_total,
+      lineCount: row.line_count,
+      simpleStatus: row.simple_status,
+      internalState: row.internal_state,
+      rowVersion: row.row_version,
+    }));
+  }
+
+  async getInvoiceForReview(invoiceHeaderId: string): Promise<InvoiceReviewDetail | null> {
+    const h = await this.pool
+      .request()
+      .input("id", sql.UniqueIdentifier, invoiceHeaderId)
+      .query(
+        `SELECT id, company_id, invoice_type, erp_vendor_account, vendor_name, invoice_number, normalized_invoice_number,
+                po_number, invoice_date, currency, subtotal, tax, grand_total, simple_status, internal_state, row_version, normalized
+           FROM dbo.ap_invoice_header WHERE id=@id`,
+      );
+    const row = h.recordset[0];
+    if (!row) return null;
+    const lr = await this.pool
+      .request()
+      .input("id", sql.UniqueIdentifier, invoiceHeaderId)
+      .query(
+        `SELECT id, source_line_no, po_line_ref, erp_item_id, gl_account, description, quantity, uom, unit_price, amount, match_status, is_code_and_approve
+           FROM dbo.ap_invoice_line WHERE ap_invoice_header_id=@id ORDER BY source_line_no`,
+      );
+    const vr = await this.pool
+      .request()
+      .input("id", sql.UniqueIdentifier, invoiceHeaderId)
+      .query(`SELECT severity, code, field_path, message, blocking FROM dbo.ap_invoice_validation WHERE ap_invoice_header_id=@id`);
+    let normalized: unknown = null;
+    try {
+      normalized = row.normalized ? JSON.parse(row.normalized) : null;
+    } catch {
+      normalized = null;
+    }
+    const lines: InvoiceLineDetail[] = lr.recordset.map((l) => ({
+      lineId: String(l.id),
+      sourceLineNo: l.source_line_no,
+      poLineRef: l.po_line_ref,
+      erpItemId: l.erp_item_id,
+      glAccount: l.gl_account,
+      description: l.description,
+      quantity: l.quantity,
+      uom: l.uom,
+      unitPrice: l.unit_price,
+      amount: l.amount,
+      matchStatus: l.match_status,
+      isCodeAndApprove: Boolean(l.is_code_and_approve),
+    }));
+    return {
+      header: {
+        id: String(row.id),
+        companyId: row.company_id,
+        invoiceType: row.invoice_type,
+        erpVendorAccount: row.erp_vendor_account,
+        vendorName: row.vendor_name,
+        invoiceNumber: row.invoice_number,
+        normalizedInvoiceNumber: row.normalized_invoice_number,
+        poNumber: row.po_number,
+        invoiceDate: row.invoice_date instanceof Date ? row.invoice_date.toISOString().slice(0, 10) : row.invoice_date,
+        currency: row.currency,
+        subtotal: row.subtotal,
+        tax: row.tax,
+        grandTotal: row.grand_total,
+        simpleStatus: row.simple_status,
+        internalState: row.internal_state,
+        rowVersion: row.row_version,
+      },
+      lines,
+      validation: vr.recordset.map((v) => ({ code: v.code, severity: v.severity, blocking: Boolean(v.blocking), fieldPath: v.field_path, message: v.message })),
+      normalized,
+    };
+  }
+
+  async updateInvoiceFields(invoiceHeaderId: string, expectedRowVersion: number, patch: UpdateInvoiceInput, actor: string): Promise<OptimisticResult> {
+    const current = await this.getInvoiceForReview(invoiceHeaderId);
+    if (!current) return { status: "NOT_FOUND" };
+    if (current.header.rowVersion !== expectedRowVersion) return { status: "CONFLICT", rowVersion: current.header.rowVersion };
+    const h = { ...current.header, ...(patch.header ?? {}) };
+    const tx = new sql.Transaction(this.pool);
+    await tx.begin();
+    try {
+      const upd = await new sql.Request(tx)
+        .input("id", sql.UniqueIdentifier, invoiceHeaderId)
+        .input("exp", sql.Int, expectedRowVersion)
+        .input("vend", sql.VarChar(50), h.erpVendorAccount)
+        .input("inv", sql.VarChar(100), h.invoiceNumber)
+        .input("date", sql.Date, h.invoiceDate ? new Date(h.invoiceDate) : null)
+        .input("po", sql.VarChar(100), h.poNumber)
+        .input("curr", sql.Char(3), h.currency)
+        .query(
+          `UPDATE dbo.ap_invoice_header
+             SET erp_vendor_account=@vend, invoice_number=@inv, invoice_date=@date, po_number=@po, currency=@curr,
+                 row_version = row_version + 1, updated_at = SYSUTCDATETIME()
+           WHERE id=@id AND row_version=@exp`,
+        );
+      if ((upd.rowsAffected[0] ?? 0) === 0) {
+        await safeRollback(tx);
+        return { status: "CONFLICT", rowVersion: current.header.rowVersion };
+      }
+      for (const lp of patch.lines ?? []) {
+        const cur = current.lines.find((l) => l.lineId === lp.lineId);
+        if (!cur) continue;
+        await new sql.Request(tx)
+          .input("id", sql.UniqueIdentifier, lp.lineId)
+          .input("item", sql.VarChar(50), lp.erpItemId !== undefined ? lp.erpItemId : cur.erpItemId)
+          .input("gl", sql.VarChar(50), lp.glAccount !== undefined ? lp.glAccount : cur.glAccount)
+          .input("qty", sql.Decimal(18, 4), lp.quantity !== undefined ? lp.quantity : cur.quantity)
+          .input("uom", sql.VarChar(20), lp.uom !== undefined ? lp.uom : cur.uom)
+          .input("price", sql.Decimal(18, 4), lp.unitPrice !== undefined ? lp.unitPrice : cur.unitPrice)
+          .input("amt", sql.Decimal(18, 4), lp.amount !== undefined ? lp.amount : cur.amount)
+          .query(`UPDATE dbo.ap_invoice_line SET erp_item_id=@item, gl_account=@gl, quantity=@qty, uom=@uom, unit_price=@price, amount=@amt WHERE id=@id`);
+      }
+      await insertAudit(tx, current.header.companyId, actor, "INVOICE_EDIT", invoiceHeaderId, JSON.stringify(patch));
+      await tx.commit();
+      return { status: "OK", rowVersion: expectedRowVersion + 1 };
+    } catch (e) {
+      await safeRollback(tx);
+      throw e;
+    }
+  }
+
+  async invoiceReviewDecision(invoiceHeaderId: string, decision: ReviewDecisionKind, expectedRowVersion: number, actor: string): Promise<OptimisticResult> {
+    const current = await this.getInvoiceForReview(invoiceHeaderId);
+    if (!current) return { status: "NOT_FOUND" };
+    if (current.header.rowVersion !== expectedRowVersion) return { status: "CONFLICT", rowVersion: current.header.rowVersion };
+    const tx = new sql.Transaction(this.pool);
+    await tx.begin();
+    try {
+      const upd = await new sql.Request(tx)
+        .input("id", sql.UniqueIdentifier, invoiceHeaderId)
+        .input("exp", sql.Int, expectedRowVersion)
+        .input("s", sql.VarChar(20), decision === "REJECT" ? "REJECTED" : current.header.internalState)
+        .input("ss", sql.VarChar(20), decision === "REJECT" ? "Rejected" : current.header.simpleStatus)
+        .query(
+          `UPDATE dbo.ap_invoice_header SET internal_state=@s, simple_status=@ss, row_version = row_version + 1, updated_at = SYSUTCDATETIME()
+           WHERE id=@id AND row_version=@exp`,
+        );
+      if ((upd.rowsAffected[0] ?? 0) === 0) {
+        await safeRollback(tx);
+        return { status: "CONFLICT", rowVersion: current.header.rowVersion };
+      }
+      await insertAudit(tx, current.header.companyId, actor, decision === "APPROVE" ? "INVOICE_APPROVE" : "INVOICE_REJECT", invoiceHeaderId, null);
+      await tx.commit();
+    } catch (e) {
+      await safeRollback(tx);
+      throw e;
+    }
+    if (decision === "APPROVE") await this.stageInvoice(invoiceHeaderId);
+    return { status: "OK", rowVersion: expectedRowVersion + 1 };
   }
 
   async getOrderHeaderById(id: string): Promise<OrderHeaderRow | null> {

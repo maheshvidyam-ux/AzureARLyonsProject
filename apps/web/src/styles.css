@@ -99,6 +99,7 @@ table.grid td.r{text-align:right;}
 .twocol{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px;}
 .match{font-size:10px;font-weight:700;letter-spacing:.03em;padding:1px 6px;border-radius:4px;white-space:nowrap;}
 .match.ok{color:var(--ok);background:var(--ok-wash);} .match.no{color:var(--crit);background:var(--crit-wash);} .match.man{color:var(--accent-ink);background:var(--accent-wash);}
+.match.warn{color:var(--warn);background:var(--warn-wash);}
 .finding{position:relative;display:grid;grid-template-columns:auto 1fr;gap:9px;background:#fbfcfe;border:1px solid var(--line-soft);border-radius:6px;padding:8px 10px 8px 12px;font-size:12.5px;margin-bottom:7px;}
 .finding::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;border-radius:6px 0 0 6px;}
 .finding.error::before{background:var(--crit);} .finding.warn::before{background:var(--warn);} .finding.info::before{background:var(--accent);}

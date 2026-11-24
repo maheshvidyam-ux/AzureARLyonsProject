@@ -7,7 +7,7 @@
  * In dev the base is "/api" (Vite proxies to the seeded in-memory API). Auth is the DEV header
  * authenticator today; swapping to an Entra bearer token is a one-line change to authHeaders().
  */
-import type { OrderReviewDetail, OrderSummaryRow, UpdateOrderInput, AppRole, ConnectionsConfig, ConnectionsResponse, ConnectionTestResult } from "./contract.js";
+import type { OrderReviewDetail, OrderSummaryRow, UpdateOrderInput, AppRole, ConnectionsConfig, ConnectionsResponse, ConnectionTestResult, InvoiceSummaryRow, InvoiceReviewDetail, UpdateInvoiceInput } from "./contract.js";
 
 const BASE = "/api";
 
@@ -84,6 +84,30 @@ export function revalidateOrder(id: Identity, orderId: string, rowVersion: numbe
 }
 export function rejectOrder(id: Identity, orderId: string, rowVersion: number): Promise<number> {
   return mutate(id, `${BASE}/orders/${encodeURIComponent(orderId)}/reject`, rowVersion);
+}
+
+// --- AP invoices ---
+export async function listInvoices(id: Identity, filter: { state?: string; type?: string } = {}): Promise<InvoiceSummaryRow[]> {
+  const qs = new URLSearchParams();
+  if (filter.state) qs.set("state", filter.state);
+  if (filter.type) qs.set("type", filter.type);
+  const res = await fetch(`${BASE}/invoices${qs.toString() ? `?${qs}` : ""}`, { headers: authHeaders(id) });
+  if (!res.ok) throw new ApiError(res.status, await readError(res));
+  return ((await res.json()) as { invoices: InvoiceSummaryRow[] }).invoices;
+}
+export async function getInvoice(id: Identity, invoiceId: string): Promise<InvoiceReviewDetail> {
+  const res = await fetch(`${BASE}/invoices/${encodeURIComponent(invoiceId)}`, { headers: authHeaders(id) });
+  if (!res.ok) throw new ApiError(res.status, await readError(res));
+  return (await res.json()) as InvoiceReviewDetail;
+}
+export function patchInvoice(id: Identity, invoiceId: string, rowVersion: number, patch: UpdateInvoiceInput): Promise<number> {
+  return mutate(id, `${BASE}/invoices/${encodeURIComponent(invoiceId)}`, rowVersion, patch);
+}
+export function approveInvoice(id: Identity, invoiceId: string, rowVersion: number): Promise<number> {
+  return mutate(id, `${BASE}/invoices/${encodeURIComponent(invoiceId)}/approve`, rowVersion);
+}
+export function rejectInvoice(id: Identity, invoiceId: string, rowVersion: number): Promise<number> {
+  return mutate(id, `${BASE}/invoices/${encodeURIComponent(invoiceId)}/reject`, rowVersion);
 }
 
 // --- settings / connections (Administrator) ---
