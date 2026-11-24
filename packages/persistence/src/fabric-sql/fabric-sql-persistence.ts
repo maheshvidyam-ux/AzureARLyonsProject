@@ -29,6 +29,11 @@ import type {
   RecordDocumentInput,
   RecordDocumentResult,
   ReviewDecisionKind,
+  RevalidationWrite,
+  CdmCorrectionRow,
+  ListCorrectionsFilter,
+  LearnedAliasRow,
+  ConfigRow,
   SaveProcessedOrderInput,
   SaveProcessedOrderResult,
   SeedExternalClaimInput,
@@ -37,6 +42,7 @@ import type {
   UpdateOrderInput,
   ValidationRow,
 } from "../ports.js";
+import { computeCorrections, aliasesFromCorrections } from "../corrections.js";
 
 export class FabricSqlPersistence implements Persistence {
   constructor(private readonly pool: sql.ConnectionPool) {}
@@ -448,7 +454,12 @@ export class FabricSqlPersistence implements Persistence {
           .query(`UPDATE dbo.order_line SET erp_item_id=@erpItem, quantity=@qty, uom=@uom, unit_price=@price WHERE id=@id`);
       }
 
-      await insertAudit(tx, current.header.companyId, actor, "ORDER_EDIT", orderHeaderId, JSON.stringify(patch));
+      // Capture the correction dataset + before/after audit, and learn aliases from matches.
+      const corrections = computeCorrections(current, patch, actor);
+      await insertCorrections(tx, corrections);
+      await upsertLearnedAliases(tx, aliasesFromCorrections(corrections));
+      const beforeJson = corrections.length ? JSON.stringify(Object.fromEntries(corrections.map((c) => [c.fieldPath + (c.lineId ? `#${c.lineId}` : ""), c.originalValue]))) : null;
+      await insertAudit(tx, current.header.companyId, actor, "ORDER_EDIT", orderHeaderId, JSON.stringify(patch), beforeJson);
       await tx.commit();
       return { status: "OK", rowVersion: expectedRowVersion + 1 };
     } catch (e) {
@@ -495,6 +506,139 @@ export class FabricSqlPersistence implements Persistence {
     // Approve stages the order to the Boomi "final tables" (→ STAGED).
     if (decision === "APPROVE") await this.stageOrder(orderHeaderId);
     return { status: "OK", rowVersion: expectedRowVersion + 1 };
+  }
+
+  async applyRevalidation(orderHeaderId: string, expectedRowVersion: number, input: RevalidationWrite, actor: string): Promise<OptimisticResult> {
+    const current = await this.getOrderForReview(orderHeaderId);
+    if (!current) return { status: "NOT_FOUND" };
+    if (current.header.rowVersion !== expectedRowVersion) return { status: "CONFLICT", rowVersion: current.header.rowVersion };
+
+    const tx = new sql.Transaction(this.pool);
+    await tx.begin();
+    try {
+      const upd = await new sql.Request(tx)
+        .input("id", sql.UniqueIdentifier, orderHeaderId)
+        .input("exp", sql.Int, expectedRowVersion)
+        .input("erpAcct", sql.VarChar(50), input.erpCustomerAccount)
+        .input("s", sql.VarChar(20), input.internalState)
+        .input("ss", sql.VarChar(20), input.simpleStatus)
+        .query(
+          `UPDATE dbo.order_header
+             SET erp_customer_account=@erpAcct, internal_state=@s, simple_status=@ss,
+                 row_version = row_version + 1, updated_at = SYSUTCDATETIME()
+           WHERE id=@id AND row_version=@exp`,
+        );
+      if ((upd.rowsAffected[0] ?? 0) === 0) {
+        await safeRollback(tx);
+        return { status: "CONFLICT", rowVersion: current.header.rowVersion };
+      }
+
+      for (const lp of input.lines) {
+        await new sql.Request(tx)
+          .input("id", sql.UniqueIdentifier, lp.lineId)
+          .input("erpItem", sql.VarChar(50), lp.erpItemId)
+          .query(`UPDATE dbo.order_line SET erp_item_id=@erpItem WHERE id=@id`);
+      }
+
+      // Replace the validation set with the freshly computed findings.
+      await new sql.Request(tx).input("id", sql.UniqueIdentifier, orderHeaderId).query("DELETE FROM dbo.order_validation WHERE order_header_id=@id");
+      for (const v of input.findings) {
+        await new sql.Request(tx)
+          .input("hid", sql.UniqueIdentifier, orderHeaderId)
+          .input("sev", sql.VarChar(10), v.severity)
+          .input("code", sql.VarChar(80), v.code)
+          .input("fp", sql.VarChar(200), v.fieldPath)
+          .input("msg", sql.NVarChar(2000), v.message)
+          .input("blocking", sql.Bit, v.blocking)
+          .query(
+            `INSERT INTO dbo.order_validation (order_header_id, severity, code, field_path, message, blocking)
+             VALUES (@hid, @sev, @code, @fp, @msg, @blocking)`,
+          );
+      }
+
+      await new sql.Request(tx)
+        .input("id", sql.UniqueIdentifier, orderHeaderId)
+        .input("from", sql.VarChar(20), current.header.internalState)
+        .input("to", sql.VarChar(20), input.internalState)
+        .input("actor", sql.VarChar(40), actor)
+        .query(`INSERT INTO dbo.order_status_history (order_header_id, from_state, to_state, actor, reason) VALUES (@id, @from, @to, @actor, 'revalidation')`);
+
+      await insertAudit(tx, current.header.companyId, actor, "ORDER_REVALIDATE", orderHeaderId, JSON.stringify({ internalState: input.internalState, findings: input.findings.length }));
+      await tx.commit();
+      return { status: "OK", rowVersion: expectedRowVersion + 1 };
+    } catch (e) {
+      await safeRollback(tx);
+      throw e;
+    }
+  }
+
+  async listCorrections(filter: ListCorrectionsFilter = {}): Promise<CdmCorrectionRow[]> {
+    const req = new sql.Request(this.pool)
+      .input("company", sql.VarChar(20), filter.companyId ?? null)
+      .input("kind", sql.VarChar(20), filter.kind ?? null)
+      .input("lim", sql.Int, filter.limit ?? 500);
+    const r = await req.query(
+      `SELECT TOP (@lim) id, company_id, module_code, order_header_id, line_id, entity, field_path,
+              original_value, corrected_value, kind, context_json, actor, at
+         FROM dbo.cdm_correction
+        WHERE (@company IS NULL OR company_id = @company) AND (@kind IS NULL OR kind = @kind)
+        ORDER BY at DESC`,
+    );
+    return r.recordset.map((row) => ({
+      id: String(row.id),
+      companyId: row.company_id,
+      moduleCode: row.module_code,
+      orderHeaderId: String(row.order_header_id),
+      lineId: row.line_id ? String(row.line_id) : null,
+      entity: row.entity,
+      fieldPath: row.field_path,
+      originalValue: row.original_value,
+      correctedValue: row.corrected_value,
+      kind: row.kind,
+      context: row.context_json ? JSON.parse(row.context_json) : null,
+      actor: row.actor,
+      at: row.at instanceof Date ? row.at.toISOString() : String(row.at),
+    }));
+  }
+
+  async listLearnedAliases(companyId: string): Promise<LearnedAliasRow[]> {
+    const r = await new sql.Request(this.pool)
+      .input("company", sql.VarChar(20), companyId)
+      .query(
+        `SELECT company_id, kind, text_raw, erp_customer_account, erp_item_id, times_confirmed, updated_at
+           FROM dbo.learned_alias WHERE company_id = @company`,
+      );
+    return r.recordset.map((row) => ({
+      companyId: row.company_id,
+      kind: row.kind,
+      text: row.text_raw,
+      erpCustomerAccount: row.erp_customer_account,
+      erpItemId: row.erp_item_id,
+      timesConfirmed: row.times_confirmed,
+      updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at),
+    }));
+  }
+
+  async getConfig(key: string): Promise<ConfigRow | null> {
+    const r = await new sql.Request(this.pool)
+      .input("k", sql.VarChar(100), key)
+      .query("SELECT config_key, config_json, updated_by, updated_at FROM dbo.app_config WHERE config_key = @k");
+    const row = r.recordset[0];
+    if (!row) return null;
+    return { key: row.config_key, value: row.config_json, updatedBy: row.updated_by, updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at) };
+  }
+
+  async putConfig(key: string, value: string, actor: string): Promise<void> {
+    await new sql.Request(this.pool)
+      .input("k", sql.VarChar(100), key)
+      .input("v", sql.NVarChar(sql.MAX), value)
+      .input("actor", sql.VarChar(80), actor)
+      .query(
+        `MERGE dbo.app_config AS t
+         USING (SELECT @k AS config_key) AS s ON t.config_key = s.config_key
+         WHEN MATCHED THEN UPDATE SET config_json = @v, updated_by = @actor, updated_at = SYSUTCDATETIME()
+         WHEN NOT MATCHED THEN INSERT (config_key, config_json, updated_by) VALUES (@k, @v, @actor);`,
+      );
   }
 
   async stageOrder(orderHeaderId: string): Promise<StageOrderResult> {
@@ -906,6 +1050,7 @@ async function insertAudit(
   action: string,
   targetId: string,
   afterJson: string | null,
+  beforeJson: string | null = null,
 ): Promise<void> {
   await new sql.Request(tx)
     .input("company", sql.VarChar(20), companyId)
@@ -914,10 +1059,57 @@ async function insertAudit(
     .input("ttype", sql.VarChar(40), "order_header")
     .input("tid", sql.VarChar(80), targetId)
     .input("after", sql.NVarChar(sql.MAX), afterJson)
+    .input("before", sql.NVarChar(sql.MAX), beforeJson)
     .query(
-      `INSERT INTO dbo.audit_event (company_id, actor, action, target_type, target_id, after_json)
-       VALUES (@company, @actor, @action, @ttype, @tid, @after)`,
+      `INSERT INTO dbo.audit_event (company_id, actor, action, target_type, target_id, after_json, before_json)
+       VALUES (@company, @actor, @action, @ttype, @tid, @after, @before)`,
     );
+}
+
+/** Upsert learned aliases (increments times_confirmed on repeat) inside the edit transaction. */
+async function upsertLearnedAliases(tx: sql.Transaction, aliases: ReturnType<typeof aliasesFromCorrections>): Promise<void> {
+  for (const a of aliases) {
+    await new sql.Request(tx)
+      .input("company", sql.VarChar(20), a.companyId)
+      .input("kind", sql.VarChar(10), a.kind)
+      .input("raw", sql.NVarChar(400), a.text)
+      .input("norm", sql.NVarChar(400), a.text.trim().toLowerCase())
+      .input("acct", sql.VarChar(50), a.erpCustomerAccount)
+      .input("item", sql.VarChar(50), a.erpItemId)
+      .query(
+        `MERGE dbo.learned_alias AS t
+         USING (SELECT @company AS company_id, @kind AS kind, @acct AS erp_customer_account, @norm AS text_norm) AS s
+            ON t.company_id = s.company_id AND t.kind = s.kind
+               AND ISNULL(t.erp_customer_account,'') = ISNULL(s.erp_customer_account,'') AND t.text_norm = s.text_norm
+         WHEN MATCHED THEN
+           UPDATE SET erp_item_id = @item, erp_customer_account = @acct, times_confirmed = t.times_confirmed + 1, updated_at = SYSUTCDATETIME()
+         WHEN NOT MATCHED THEN
+           INSERT (company_id, kind, text_raw, text_norm, erp_customer_account, erp_item_id)
+           VALUES (@company, @kind, @raw, @norm, @acct, @item);`,
+      );
+  }
+}
+
+/** Insert captured corrections (the learning dataset) inside the edit transaction. */
+async function insertCorrections(tx: sql.Transaction, rows: ReturnType<typeof computeCorrections>): Promise<void> {
+  for (const c of rows) {
+    await new sql.Request(tx)
+      .input("company", sql.VarChar(20), c.companyId)
+      .input("module", sql.VarChar(40), c.moduleCode)
+      .input("oh", sql.UniqueIdentifier, c.orderHeaderId)
+      .input("line", sql.UniqueIdentifier, c.lineId)
+      .input("entity", sql.VarChar(10), c.entity)
+      .input("fp", sql.VarChar(200), c.fieldPath)
+      .input("orig", sql.NVarChar(400), c.originalValue)
+      .input("corr", sql.NVarChar(400), c.correctedValue)
+      .input("kind", sql.VarChar(20), c.kind)
+      .input("ctx", sql.NVarChar(sql.MAX), c.context ? JSON.stringify(c.context) : null)
+      .input("actor", sql.VarChar(80), c.actor)
+      .query(
+        `INSERT INTO dbo.cdm_correction (company_id, module_code, order_header_id, line_id, entity, field_path, original_value, corrected_value, kind, context_json, actor)
+         VALUES (@company, @module, @oh, @line, @entity, @fp, @orig, @corr, @kind, @ctx, @actor)`,
+      );
+  }
 }
 
 /** Format a mssql Date/datetime value as YYYY-MM-DD. */

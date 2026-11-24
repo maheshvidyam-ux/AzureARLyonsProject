@@ -26,10 +26,9 @@ import {
   type Persistence,
 } from "@coa/persistence";
 import type { MasterDataReader } from "@coa/fabric-read";
-import { matchCustomer, matchItem } from "@coa/matching";
+import { evaluateOrder } from "@coa/evaluation";
 import { decodeAttachmentBytes, type IngestionRef } from "./ingestion.js";
 import { normalize } from "./normalize.js";
-import { validateStructural } from "./validation.js";
 import type { BlobRef, BlobStore, DocumentIntelligenceClient, FoundryClient, GraphMailMessage } from "./ports.js";
 
 /**
@@ -155,45 +154,15 @@ export async function processAttachment(
   }
   trace.push(`NORMALIZED po#=${norm.po.header.normalized_po_number ?? "∅"} lines=${norm.po.lines.length}`);
 
-  // 6. Deterministic validation.
-  const findings = validateStructural(norm.po);
-
-  // 6b. Master matching (Phase 3) — produces the ERP account + items that form the duplicate
-  // business key. Unmatched customer/item is a blocking finding; stale masters are a controlled
-  // exception (spec §6). Skipped when no read model is wired (matching deferred).
-  if (deps.masters) {
-    const health = await deps.masters.health();
-    if (health.stale) {
-      findings.push(finding2("MASTER_DATA_STALE", null, `Fabric master data is stale (last refreshed ${health.lastRefreshed ?? "never"}); matching withheld.`));
-      trace.push("MATCH withheld — master data stale (controlled exception)");
-    } else {
-      const [customers, items] = await Promise.all([deps.masters.findCustomers(companyId), deps.masters.findItems(companyId)]);
-      const cm = matchCustomer(
-        { name: norm.po.header.customer?.name?.value ?? null, billTo: norm.po.header.bill_to?.value ?? null, shipTo: norm.po.header.ship_to?.value ?? null },
-        customers,
-      );
-      norm.po.header.customer = {
-        ...(norm.po.header.customer ?? {}),
-        erp_customer_account: { value: cm.erpCustomerAccount, confidence: cm.confidence, evidence: { prediction_source: null, raw_text: cm.evidence } },
-        match_status: cm.matchStatus,
-      };
-      if (!cm.erpCustomerAccount) {
-        findings.push(finding2("CUSTOMER_UNMATCHED", "header.customer", `Customer not matched to an ERP account (${cm.evidence}).`));
-      }
-      norm.po.lines.forEach((line, i) => {
-        const im = matchItem({ customerItemCode: line.customer_item_code?.value ?? null, description: line.description?.value ?? null }, items, cm.erpCustomerAccount);
-        line.erp_item_id = { value: im.erpItemId, confidence: im.confidence, evidence: { prediction_source: null, raw_text: im.evidence } };
-        line.match_status = im.matchStatus;
-        if (!im.erpItemId) {
-          findings.push(finding2("ITEM_UNMATCHED", `lines[${i}]`, `Line ${i + 1} item not matched (${im.evidence}).`));
-        }
-      });
-      trace.push(`MATCHED customer=${cm.matchStatus}(${cm.erpCustomerAccount ?? "∅"}) items=${norm.po.lines.map((l) => l.match_status).join(",")}`);
-    }
-  } else {
-    findings.push({ severity: "WARNING", code: "CUSTOMER_MATCH_DEFERRED", field_path: "header.customer.erp_customer_account", message: "Customer not matched (no Fabric read model wired).", blocking: false });
-  }
-  norm.po.validation = findings;
+  // 6. Deterministic evaluation: structural/arithmetic rules + Fabric master-data matching.
+  // Shared with the reviewer revalidate endpoint via @coa/evaluation (one source of truth).
+  // Mutates norm.po with the matched ERP account + items that form the duplicate business key.
+  const findings = await evaluateOrder(norm.po, deps.masters);
+  trace.push(
+    deps.masters
+      ? `EVALUATED customer=${norm.po.header.customer?.match_status ?? "∅"}(${norm.po.header.customer?.erp_customer_account?.value ?? "∅"}) items=${norm.po.lines.map((l) => l.match_status ?? "∅").join(",")}`
+      : "EVALUATED (matching deferred — no read model)",
+  );
 
   const blocking = findings.filter((f) => f.blocking);
   const lowConfidence = norm.po.extraction.overall_confidence < CONFIDENCE_REVIEW_THRESHOLD;
@@ -247,7 +216,7 @@ export async function processAttachment(
     if (claim.status === "COLLISION") {
       const detail = `Duplicate business key; existing claim via ${claim.matchedChannel ?? "unknown"} (${claim.matchedExistingRef ?? "n/a"}).`;
       await deps.persistence.markDuplicateReview(saved.orderHeaderId, detail);
-      findings.push(finding2("DUPLICATE_DETECTED", null, detail));
+      findings.push({ severity: "ERROR", code: "DUPLICATE_DETECTED", field_path: null, message: detail, blocking: true });
       state = "DUPLICATE_REVIEW";
       decision = "NEEDS_REVIEW";
       trace.push(`DUPLICATE collision vs ${claim.matchedChannel ?? "?"} -> DUPLICATE_REVIEW`);
@@ -267,11 +236,6 @@ export async function processAttachment(
   const res = result(companyId, documentId, saved.orderHeaderId, ingestion, state, norm.po, findings, trace, decision);
   res.duplicateBusinessKey = businessKey;
   return res;
-}
-
-/** A blocking ERROR validation finding. */
-function finding2(code: string, field_path: string | null, message: string): ValidationFinding {
-  return { severity: "ERROR", code, field_path, message, blocking: true };
 }
 
 /** Process every attachment of every fetched message (the slice "runner"). */

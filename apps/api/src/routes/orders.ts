@@ -5,11 +5,15 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Persistence } from "@coa/persistence";
+import type { MasterDataReader } from "@coa/fabric-read";
 import { WRITE_ROLES, hasAnyRole, type Authenticator, type Principal } from "../auth.js";
+import { revalidateOrder } from "../revalidate.js";
 
 export interface OrderRoutesDeps {
   persistence: Persistence;
   authenticate: Authenticator;
+  /** Fabric master-data reader; when present, /orders/:id/revalidate re-matches customer + items. */
+  masters?: MasterDataReader;
 }
 
 export async function registerOrderRoutes(app: FastifyInstance, deps: OrderRoutesDeps): Promise<void> {
@@ -63,6 +67,27 @@ export async function registerOrderRoutes(app: FastifyInstance, deps: OrderRoute
 
     const result = await persistence.updateOrderFields(req.params.id, expected, req.body as never, principal.sub);
     return respondOptimistic(reply, result);
+  });
+
+  // Revalidate: re-run structural + master matching against the corrected CDM (optimistic concurrency).
+  app.post<{ Params: { id: string } }>("/orders/:id/revalidate", async (req, reply) => {
+    const principal = await authn(req, reply);
+    if (!principal) return;
+    if (!hasAnyRole(principal, WRITE_ROLES)) return reply.code(403).send({ error: "forbidden" });
+    const expected = ifMatch(req, reply);
+    if (expected == null) return;
+
+    const outcome = await revalidateOrder({ persistence, masters: deps.masters }, req.params.id, expected, principal.sub);
+    switch (outcome.status) {
+      case "OK":
+        return reply.header("etag", String(outcome.rowVersion)).send({ rowVersion: outcome.rowVersion, internalState: outcome.internalState, findings: outcome.findings });
+      case "CONFLICT":
+        return reply.code(409).send({ error: "version conflict", rowVersion: outcome.rowVersion });
+      case "INVALID_STATE":
+        return reply.code(409).send({ error: `cannot revalidate an order in state ${outcome.internalState}`, internalState: outcome.internalState });
+      case "NOT_FOUND":
+        return reply.code(404).send({ error: "not found" });
+    }
   });
 
   // Approve / reject.

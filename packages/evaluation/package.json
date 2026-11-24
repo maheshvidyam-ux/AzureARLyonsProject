@@ -1,0 +1,12 @@
+{
+  "name": "@coa/evaluation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@coa/fabric-read": "*",
+    "@coa/matching": "*",
+    "@coa/po-schema": "*"
+  }
+}

@@ -10,10 +10,10 @@
  */
 import { createPool, fabricSqlConfigFromEnv, FabricSqlPersistence } from "@coa/persistence";
 import { createServiceBusIngestionQueue } from "@coa/messaging";
-import { createFabricLakehouseReader, type MasterDataReader } from "@coa/fabric-read";
+import { createFabricLakehouseReader, LearningAugmentedMasterReader, aliasOverlayFromRows, type MasterDataReader } from "@coa/fabric-read";
 import { createAzureBlobStore } from "./storage/azure-blob-store.js";
 import { createAzureDocumentIntelligenceClient, createDefaultExcelExtractor, RoutingExtractor } from "./extraction/index.js";
-import { createAzureFoundryClient } from "./interpretation/index.js";
+import { createAzureFoundryClient, FewShotCompleter } from "./interpretation/index.js";
 import { createDefaultGraphApiClient, IngestionWorker, runIngestionConsumer } from "./ingestion/index.js";
 import type { PipelineDeps } from "./pipeline/index.js";
 
@@ -34,14 +34,23 @@ async function main(): Promise<void> {
     di: createAzureDocumentIntelligenceClient({ resolveBytes }),
     excel: createDefaultExcelExtractor({ resolveBytes }),
   });
-  const foundry = createAzureFoundryClient();
+  // Few-shot learning: recent reviewer corrections are injected into the interpretation prompt.
+  const foundry = createAzureFoundryClient({
+    wrapCompleter: (c) =>
+      new FewShotCompleter(c, async () => {
+        const rows = await persistence.listCorrections({ limit: 8 });
+        return rows.map((r) => ({ field: r.fieldPath, from: r.originalValue, to: r.correctedValue, kind: r.kind }));
+      }),
+  });
 
   // Master matching + the atomic duplicate claim turn on when the Fabric Lakehouse masters are
   // configured (LAKEHOUSE_SQL_SERVER). Without it, matching is deferred (CUSTOMER_MATCH_DEFERRED).
+  // The reader is wrapped with learned aliases (corrections overlaid onto the ERP masters).
   let masters: MasterDataReader | undefined;
   if (process.env.LAKEHOUSE_SQL_SERVER) {
-    masters = await createFabricLakehouseReader();
-    console.log("[worker] Fabric Lakehouse masters wired — matching + duplicate claim enabled");
+    const base = await createFabricLakehouseReader();
+    masters = new LearningAugmentedMasterReader(base, async (companyId) => aliasOverlayFromRows(await persistence.listLearnedAliases(companyId)));
+    console.log("[worker] Fabric Lakehouse masters wired (with learned-alias overlay) — matching + duplicate claim enabled");
   }
   // With masters wired, straight-through orders auto-stage to the Boomi tables (Ready for pickup).
   const pipeline: PipelineDeps = { blob, persistence, di, foundry, ...(masters ? { masters, autoStage: true } : {}) };

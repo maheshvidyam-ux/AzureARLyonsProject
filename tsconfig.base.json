@@ -23,7 +23,8 @@
       "@coa/messaging": ["packages/messaging/src/index.ts"],
       "@coa/fabric-read": ["packages/fabric-read/src/index.ts"],
       "@coa/matching": ["packages/matching/src/index.ts"],
-      "@coa/invoice-schema": ["packages/invoice-schema/src/index.ts"]
+      "@coa/invoice-schema": ["packages/invoice-schema/src/index.ts"],
+      "@coa/evaluation": ["packages/evaluation/src/index.ts"]
     }
   }
 }

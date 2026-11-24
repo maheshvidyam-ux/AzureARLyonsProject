@@ -7,7 +7,7 @@
  * In dev the base is "/api" (Vite proxies to the seeded in-memory API). Auth is the DEV header
  * authenticator today; swapping to an Entra bearer token is a one-line change to authHeaders().
  */
-import type { OrderReviewDetail, OrderSummaryRow, UpdateOrderInput, AppRole } from "./contract.js";
+import type { OrderReviewDetail, OrderSummaryRow, UpdateOrderInput, AppRole, ConnectionsConfig, ConnectionsResponse, ConnectionTestResult } from "./contract.js";
 
 const BASE = "/api";
 
@@ -79,6 +79,26 @@ export function patchOrder(id: Identity, orderId: string, rowVersion: number, pa
 export function approveOrder(id: Identity, orderId: string, rowVersion: number): Promise<number> {
   return mutate(id, `${BASE}/orders/${encodeURIComponent(orderId)}/approve`, rowVersion);
 }
+export function revalidateOrder(id: Identity, orderId: string, rowVersion: number): Promise<number> {
+  return mutate(id, `${BASE}/orders/${encodeURIComponent(orderId)}/revalidate`, rowVersion);
+}
 export function rejectOrder(id: Identity, orderId: string, rowVersion: number): Promise<number> {
   return mutate(id, `${BASE}/orders/${encodeURIComponent(orderId)}/reject`, rowVersion);
+}
+
+// --- settings / connections (Administrator) ---
+export async function getConnections(id: Identity): Promise<ConnectionsResponse> {
+  const res = await fetch(`${BASE}/settings/connections`, { headers: authHeaders(id) });
+  if (!res.ok) throw new ApiError(res.status, await readError(res));
+  return (await res.json()) as ConnectionsResponse;
+}
+export async function putConnections(id: Identity, config: ConnectionsConfig): Promise<ConnectionsResponse> {
+  const res = await fetch(`${BASE}/settings/connections`, { method: "PUT", headers: { ...authHeaders(id), "content-type": "application/json" }, body: JSON.stringify(config) });
+  if (!res.ok) throw new ApiError(res.status, await readError(res));
+  return (await res.json()) as ConnectionsResponse;
+}
+export async function testConnection(id: Identity, target: "operationalDb" | "lakehouse", config: ConnectionsConfig): Promise<ConnectionTestResult> {
+  const res = await fetch(`${BASE}/settings/connections/test`, { method: "POST", headers: { ...authHeaders(id), "content-type": "application/json" }, body: JSON.stringify({ target, config }) });
+  if (!res.ok) throw new ApiError(res.status, await readError(res));
+  return (await res.json()) as ConnectionTestResult;
 }

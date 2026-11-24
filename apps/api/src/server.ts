@@ -7,6 +7,7 @@ import { registerHealthRoutes } from "./routes/health.js";
 import { registerGraphNotificationRoutes } from "./routes/graph-notifications.js";
 import { registerOrderRoutes } from "./routes/orders.js";
 import { registerUploadRoutes } from "./routes/uploads.js";
+import { registerSettingsRoutes } from "./routes/settings.js";
 import { devHeaderAuthenticator } from "./auth.js";
 import type { ServerDeps } from "./types.js";
 
@@ -22,9 +23,10 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
 
   const authenticate = deps.authenticate ?? devHeaderAuthenticator();
 
-  // Reviewer workbench routes are registered only when a persistence backend is wired.
+  // Reviewer workbench + settings routes are registered only when a persistence backend is wired.
   if (deps.persistence) {
-    await registerOrderRoutes(app, { persistence: deps.persistence, authenticate });
+    await registerOrderRoutes(app, { persistence: deps.persistence, authenticate, masters: deps.masters });
+    await registerSettingsRoutes(app, { persistence: deps.persistence, authenticate, tester: deps.connectionTester });
   }
   // Manual upload route is registered only when an upload processor is wired.
   if (deps.uploads) {

@@ -243,6 +243,64 @@ export type OptimisticResult =
 
 export type ReviewDecisionKind = "APPROVE" | "REJECT";
 
+// --- correction capture (learning dataset) ---
+export type CorrectionKind = "customer_match" | "item_match" | "value" | "format";
+export interface CdmCorrectionRow {
+  id: string;
+  companyId: string;
+  moduleCode: string;
+  orderHeaderId: string;
+  lineId: string | null;
+  entity: "header" | "line";
+  fieldPath: string;
+  originalValue: string | null;
+  correctedValue: string | null;
+  kind: CorrectionKind;
+  /** Keys the learning layer maps FROM (e.g. customer name, item code/description). */
+  context: Record<string, unknown> | null;
+  actor: string;
+  at: string;
+}
+export interface ListCorrectionsFilter {
+  companyId?: string;
+  kind?: CorrectionKind;
+  limit?: number;
+}
+
+/** A stored application-config entry (connection coordinates etc.; never secrets — Entra auth). */
+export interface ConfigRow {
+  key: string;
+  value: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+/** A mapping learned from confirmed corrections; overlaid onto ERP masters so it stops recurring. */
+export interface LearnedAliasRow {
+  companyId: string;
+  kind: "customer" | "item";
+  text: string;
+  erpCustomerAccount: string | null;
+  erpItemId: string | null;
+  timesConfirmed: number;
+  updatedAt: string;
+}
+
+/**
+ * Result of re-evaluating a (corrected) order: the recomputed findings + resulting state, plus the
+ * match outcomes to write back so order_header/order_line stay in sync with the evaluation. Applied
+ * atomically with optimistic concurrency (spec §7/§13).
+ */
+export interface RevalidationWrite {
+  findings: ValidationWrite[];
+  internalState: string;
+  simpleStatus: string;
+  /** Matched/kept ERP customer account to persist on the header. */
+  erpCustomerAccount: string | null;
+  /** Matched/kept ERP item id per line. */
+  lines: Array<{ lineId: string; erpItemId: string | null }>;
+}
+
 // --- Boomi staging ("final tables"; spec §8/§5, ADR 0003/0004) ---
 export interface StageOrderResult {
   stagingId: string;
@@ -354,6 +412,21 @@ export interface Persistence {
    * Boomi "final tables" (→ STAGED, publish_status READY); REJECT → REJECTED.
    */
   reviewDecision(orderHeaderId: string, decision: ReviewDecisionKind, expectedRowVersion: number, actor: string): Promise<OptimisticResult>;
+  /**
+   * Re-run validation/matching results against a (corrected) order: replace order_validation,
+   * write back match outcomes, recompute internal_state, with optimistic concurrency + audit.
+   */
+  applyRevalidation(orderHeaderId: string, expectedRowVersion: number, input: RevalidationWrite, actor: string): Promise<OptimisticResult>;
+  /** Read captured CDM corrections (the learning dataset), most recent first. */
+  listCorrections(filter?: ListCorrectionsFilter): Promise<CdmCorrectionRow[]>;
+  /** Learned aliases for a company — overlaid onto ERP masters by the learning-augmented reader. */
+  listLearnedAliases(companyId: string): Promise<LearnedAliasRow[]>;
+
+  // --- application config (connection coordinates; admin-managed) ---
+  /** Read a config entry by key, or null if unset. */
+  getConfig(key: string): Promise<ConfigRow | null>;
+  /** Upsert a config entry (idempotent on key). */
+  putConfig(key: string, value: string, actor: string): Promise<void>;
 
   // --- Boomi staging ---
   /** Publish an order to the Boomi staging tables (idempotent) and set it STAGED. */

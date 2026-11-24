@@ -58,13 +58,14 @@ export class AzureOpenAiCompleter implements ChatCompleter {
   }
 }
 
-export function createAzureFoundryClient(): AzureFoundryClient {
+export function createAzureFoundryClient(opts: { wrapCompleter?: (c: ChatCompleter) => ChatCompleter } = {}): AzureFoundryClient {
   const endpoint = requireEnv("AI_FOUNDRY_ENDPOINT");
   const deployment = requireEnv("AI_FOUNDRY_DEPLOYMENT");
   const apiVersion = process.env.AI_FOUNDRY_API_VERSION ?? "2024-10-21";
   const tokenProvider = getBearerTokenProvider(new DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default");
   const client = new AzureOpenAI({ endpoint, apiVersion, azureADTokenProvider: tokenProvider });
-  return new AzureFoundryClient({ completer: new AzureOpenAiCompleter(client), deployment });
+  const completer = opts.wrapCompleter ? opts.wrapCompleter(new AzureOpenAiCompleter(client)) : new AzureOpenAiCompleter(client);
+  return new AzureFoundryClient({ completer, deployment });
 }
 
 function requireEnv(name: string): string {

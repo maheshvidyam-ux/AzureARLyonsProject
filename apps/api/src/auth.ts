@@ -18,6 +18,9 @@ export type Authenticator = (headers: Record<string, string | string[] | undefin
 /** Roles permitted to edit/approve/reject orders (Viewer is read-only). */
 export const WRITE_ROLES: AppRole[] = ["OrderProcessor", "Supervisor", "Administrator"];
 
+/** Roles permitted to view/change connection configuration. */
+export const ADMIN_ROLES: AppRole[] = ["Administrator"];
+
 export function hasAnyRole(principal: Principal, roles: AppRole[]): boolean {
   return principal.roles.some((r) => roles.includes(r));
 }

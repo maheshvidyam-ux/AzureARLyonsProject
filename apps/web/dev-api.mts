@@ -9,7 +9,7 @@
  *   npm --workspace @coa/web run dev         # the SPA, :5173  (proxies /api → :5174)
  */
 import { InMemoryPersistence } from "@coa/persistence";
-import { InMemoryMasterDataReader } from "@coa/fabric-read";
+import { InMemoryMasterDataReader, LearningAugmentedMasterReader, aliasOverlayFromRows } from "@coa/fabric-read";
 import { buildServer } from "../api/src/server.js";
 import { processAttachment, type PipelineDeps } from "../workers/src/pipeline/pipeline.js";
 import type { GraphMailMessage } from "../workers/src/pipeline/ports.js";
@@ -34,12 +34,15 @@ function mail(stem: string, id: string, sender: string): GraphMailMessage {
 
 async function main(): Promise<void> {
   const persistence = new InMemoryPersistence();
+  // Learning-augmented masters: corrections a CSR makes are overlaid as aliases on the next match.
+  const baseMasters = new InMemoryMasterDataReader({ customers: SAMPLE_CUSTOMERS, items: SAMPLE_ITEMS });
+  const masters = new LearningAugmentedMasterReader(baseMasters, async (companyId) => aliasOverlayFromRows(await persistence.listLearnedAliases(companyId)));
   const pipeline: PipelineDeps = {
     blob: new InMemoryBlobStore(),
     persistence,
     di: new MockDocumentIntelligenceClient(),
     foundry: new MockFoundryClient(),
-    masters: new InMemoryMasterDataReader({ customers: SAMPLE_CUSTOMERS, items: SAMPLE_ITEMS }),
+    masters,
   };
 
   // Seed a varied queue from the recorded sample documents.
@@ -61,6 +64,12 @@ async function main(): Promise<void> {
     graphClientState: "dev",
     graph: { async enqueueMessageIds() {} },
     persistence,
+    masters: pipeline.masters, // enables /orders/:id/revalidate (re-matching)
+    // Dev stub for the settings "Test connection" (no live Azure locally).
+    connectionTester: async (target, cfg) => {
+      const c = target === "operationalDb" ? cfg.operationalDb : cfg.lakehouse;
+      return c.server ? { ok: true, detail: `(dev simulated) would connect to ${c.server}/${c.database}` } : { ok: false, error: "no server configured" };
+    },
     logger: true,
   });
   await app.listen({ port: PORT, host: "127.0.0.1" });

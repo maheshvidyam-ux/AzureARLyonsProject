@@ -41,4 +41,4 @@ export function useAuth(): AuthValue {
   return v;
 }
 
-export const SELECTABLE_ROLES: AppRole[] = ["Supervisor", "OrderProcessor", "Viewer"];
+export const SELECTABLE_ROLES: AppRole[] = ["Supervisor", "OrderProcessor", "Viewer", "Administrator"];

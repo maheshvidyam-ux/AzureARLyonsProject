@@ -87,3 +87,31 @@ export interface UpdateOrderInput {
 /** App roles — mirrors apps/api/src/auth.ts. */
 export type AppRole = "Administrator" | "OrderProcessor" | "Supervisor" | "Viewer" | "IntegrationService";
 export const WRITE_ROLES: AppRole[] = ["OrderProcessor", "Supervisor", "Administrator"];
+
+/** Connection config — mirrors apps/api/src/settings.ts ConnectionsConfig. */
+export interface ConnectionsConfig {
+  operationalDb: { server: string; database: string; authMode: string };
+  lakehouse: {
+    enabled: boolean;
+    server: string;
+    database: string;
+    customerTable: string;
+    itemTable: string;
+    customerAccountColumn: string;
+    customerNameColumn: string;
+    dataAreaColumn: string;
+    itemIdColumn: string;
+    itemSkuColumn: string;
+  };
+  ai: { docIntelEndpoint: string; foundryEndpoint: string; foundryDeployment: string };
+}
+export interface ConnectionsResponse {
+  config: ConnectionsConfig;
+  updatedBy: string | null;
+  updatedAt: string | null;
+}
+export interface ConnectionTestResult {
+  ok: boolean;
+  detail?: string;
+  error?: string;
+}

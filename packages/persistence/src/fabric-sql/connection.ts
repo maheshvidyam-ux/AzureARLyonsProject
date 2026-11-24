@@ -19,22 +19,39 @@ export interface FabricSqlEnv {
  *   FABRIC_SQL_SERVER, FABRIC_SQL_DATABASE   (required)
  * Encryption is always on. Entra default-credential auth is used.
  */
-export function fabricSqlConfigFromEnv(): sql.config {
-  const server = requireEnv("FABRIC_SQL_SERVER");
-  const database = requireEnv("FABRIC_SQL_DATABASE");
+/** Build an mssql config (Entra default-credential auth, encryption on) for a given server/database. */
+export function fabricSqlConfig(env: FabricSqlEnv): sql.config {
   return {
-    server,
-    database,
+    server: env.server,
+    database: env.database,
     options: { encrypt: true, trustServerCertificate: false },
     authentication: { type: "azure-active-directory-default" },
     pool: { max: 10, min: 0, idleTimeoutMillis: 30_000 },
   } as sql.config;
 }
 
+export function fabricSqlConfigFromEnv(): sql.config {
+  return fabricSqlConfig({ server: requireEnv("FABRIC_SQL_SERVER"), database: requireEnv("FABRIC_SQL_DATABASE") });
+}
+
 export async function createPool(config: sql.config): Promise<sql.ConnectionPool> {
   const pool = new sql.ConnectionPool(config);
   await pool.connect();
   return pool;
+}
+
+/** Open a transient pool, run a lightweight probe, and close it. Used by the "test connection" UI. */
+export async function probeConnection(config: sql.config, probeSql = "SELECT 1 AS ok"): Promise<{ ok: boolean; error?: string }> {
+  let pool: sql.ConnectionPool | undefined;
+  try {
+    pool = await createPool({ ...config, pool: { max: 1, min: 0, idleTimeoutMillis: 5_000 } } as sql.config);
+    await pool.request().query(probeSql);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  } finally {
+    if (pool) await pool.close().catch(() => undefined);
+  }
 }
 
 function requireEnv(name: string): string {

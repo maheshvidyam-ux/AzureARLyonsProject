@@ -5,7 +5,7 @@
  * Viewers get a read-only view (every control disabled); the server also enforces this (403).
  */
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { approveOrder, getOrder, patchOrder, rejectOrder, ApiError, ConflictError } from "../api/client.js";
+import { approveOrder, getOrder, patchOrder, rejectOrder, revalidateOrder, ApiError, ConflictError } from "../api/client.js";
 import type { OrderLineDetail, OrderReviewDetail, UpdateOrderInput } from "../api/contract.js";
 import { useAuth } from "../auth/AuthContext.js";
 import { StatusChip } from "../components/StatusChip.js";
@@ -232,6 +232,15 @@ export function OrderDetail({ orderId, onBack, notify }: { orderId: string; onBa
               <span>Optimistic concurrency</span>
               <span className="ver">If-Match: v{h.rowVersion}{dirty ? " · unsaved" : ""}</span>
             </div>
+            <button
+              className="btn"
+              style={{ width: "100%" }}
+              disabled={!canWrite || terminal || busy || dirty}
+              title={dirty ? "Save your edits first" : "Re-run validation + master matching against the corrected data"}
+              onClick={() => void runMutation(() => revalidateOrder(identity, orderId, h.rowVersion), "Revalidated")}
+            >
+              ↻ Re-run validation
+            </button>
             <div className="btns">
               <button className="btn danger" disabled={!canWrite || terminal || busy} onClick={() => void runMutation(() => rejectOrder(identity, orderId, h.rowVersion), "Rejected")}>
                 Reject

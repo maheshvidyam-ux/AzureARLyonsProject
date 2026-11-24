@@ -28,6 +28,11 @@ import type {
   RecordDocumentInput,
   RecordDocumentResult,
   ReviewDecisionKind,
+  RevalidationWrite,
+  CdmCorrectionRow,
+  ListCorrectionsFilter,
+  LearnedAliasRow,
+  ConfigRow,
   SaveProcessedOrderInput,
   SaveProcessedOrderResult,
   SeedExternalClaimInput,
@@ -36,6 +41,7 @@ import type {
   UpdateOrderInput,
   ValidationRow,
 } from "../ports.js";
+import { computeCorrections, aliasesFromCorrections } from "../corrections.js";
 
 interface MailMessage {
   id: string;
@@ -106,6 +112,10 @@ export class InMemoryPersistence implements Persistence {
   private readonly extractedByDocId = new Map<string, ExtractedOrder>();
   private readonly headerByExtractedId = new Map<string, OrderHeader>();
   private readonly validationByHeaderId = new Map<string, ValidationRow[]>();
+  /** captured CDM corrections (the learning dataset) */
+  private readonly corrections: CdmCorrectionRow[] = [];
+  /** learned aliases keyed by companyId|kind|account|textNorm */
+  private readonly learnedAliases = new Map<string, LearnedAliasRow>();
   /** active duplicate claims keyed by business_key (CLAIMED/RESOLVED) */
   private readonly activeClaims = new Map<string, { channel: DuplicateChannel; ref: string | null; orderHeaderId: string | null; claimId: string }>();
   /** Boomi staging records keyed by orderHeaderId (one per order). */
@@ -318,10 +328,30 @@ export class InMemoryPersistence implements Persistence {
     };
   }
 
-  async updateOrderFields(orderHeaderId: string, expectedRowVersion: number, patch: UpdateOrderInput, _actor: string): Promise<OptimisticResult> {
+  async updateOrderFields(orderHeaderId: string, expectedRowVersion: number, patch: UpdateOrderInput, actor: string): Promise<OptimisticResult> {
     const h = this.findHeader(orderHeaderId);
     if (!h) return { status: "NOT_FOUND" };
     if (h.rowVersion !== expectedRowVersion) return { status: "CONFLICT", rowVersion: h.rowVersion };
+
+    // Capture the correction dataset (diff before mutating) + promote match corrections to aliases.
+    const before = await this.getOrderForReview(orderHeaderId);
+    if (before) {
+      const corrections = computeCorrections(before, patch, actor);
+      for (const c of corrections) this.corrections.push({ ...c, id: randomUUID(), at: new Date().toISOString() });
+      for (const a of aliasesFromCorrections(corrections)) {
+        const key = `${a.companyId}|${a.kind}|${a.erpCustomerAccount ?? ""}|${a.text.trim().toLowerCase()}`;
+        const existing = this.learnedAliases.get(key);
+        this.learnedAliases.set(key, {
+          companyId: a.companyId,
+          kind: a.kind,
+          text: a.text,
+          erpCustomerAccount: a.erpCustomerAccount,
+          erpItemId: a.erpItemId,
+          timesConfirmed: (existing?.timesConfirmed ?? 0) + 1,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    }
 
     if (patch.header) {
       const p = patch.header;
@@ -357,6 +387,46 @@ export class InMemoryPersistence implements Persistence {
     }
     h.rowVersion += 1;
     return { status: "OK", rowVersion: h.rowVersion };
+  }
+
+  async applyRevalidation(orderHeaderId: string, expectedRowVersion: number, input: RevalidationWrite, _actor: string): Promise<OptimisticResult> {
+    const h = this.findHeader(orderHeaderId);
+    if (!h) return { status: "NOT_FOUND" };
+    if (h.rowVersion !== expectedRowVersion) return { status: "CONFLICT", rowVersion: h.rowVersion };
+
+    h.erpCustomerAccount = input.erpCustomerAccount;
+    for (const lp of input.lines) {
+      const line = h.lines.find((l) => l.lineId === lp.lineId);
+      if (line) line.erpItemId = lp.erpItemId;
+    }
+    this.validationByHeaderId.set(
+      h.id,
+      input.findings.map((f) => ({ code: f.code, severity: f.severity, blocking: f.blocking, fieldPath: f.fieldPath, message: f.message })),
+    );
+    h.internalState = input.internalState;
+    h.simpleStatus = input.simpleStatus;
+    h.rowVersion += 1;
+    return { status: "OK", rowVersion: h.rowVersion };
+  }
+
+  async listCorrections(filter: ListCorrectionsFilter = {}): Promise<CdmCorrectionRow[]> {
+    let rows = [...this.corrections].reverse(); // most recent first
+    if (filter.companyId) rows = rows.filter((c) => c.companyId === filter.companyId);
+    if (filter.kind) rows = rows.filter((c) => c.kind === filter.kind);
+    return rows.slice(0, filter.limit ?? 500);
+  }
+
+  async listLearnedAliases(companyId: string): Promise<LearnedAliasRow[]> {
+    return [...this.learnedAliases.values()].filter((a) => a.companyId === companyId).map((a) => ({ ...a }));
+  }
+
+  private readonly config = new Map<string, ConfigRow>();
+  async getConfig(key: string): Promise<ConfigRow | null> {
+    const row = this.config.get(key);
+    return row ? { ...row } : null;
+  }
+  async putConfig(key: string, value: string, actor: string): Promise<void> {
+    this.config.set(key, { key, value, updatedBy: actor, updatedAt: new Date().toISOString() });
   }
 
   async stageOrder(orderHeaderId: string): Promise<StageOrderResult> {
