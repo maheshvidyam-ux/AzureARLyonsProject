@@ -23,7 +23,7 @@ import { createAzureBlobStore } from "./storage/azure-blob-store.js";
 import { createAzureDocumentIntelligenceClient, createDefaultExcelExtractor, RoutingExtractor } from "./extraction/index.js";
 import { createAzureFoundryClient, FewShotCompleter } from "./interpretation/index.js";
 import { createDefaultGraphApiClient, IngestionWorker, InvoiceIngestionWorker, runIngestionConsumer } from "./ingestion/index.js";
-import { PersistenceInvoiceDedup, type InvoicePipelineDeps } from "./invoice/index.js";
+import { PersistenceInvoiceDedup, createAzureInvoiceFoundryClient, type InvoicePipelineDeps } from "./invoice/index.js";
 import type { PipelineDeps } from "./pipeline/index.js";
 
 function requireEnv(name: string): string {
@@ -75,9 +75,16 @@ async function main(): Promise<void> {
   if (process.env.AP_MAILBOX && process.env.LAKEHOUSE_SQL_SERVER) {
     const apMailbox = process.env.AP_MAILBOX;
     const invoiceMasters = await createFabricInvoiceLakehouseReader(await invoiceConfigFromStored(persistence));
-    // ⚠️ TODO: invoice extraction wants a prebuilt-invoice DI model + an invoice Foundry prompt.
-    // Reusing the order `di`/`foundry` here is a placeholder until createAzureInvoiceFoundryClient lands.
-    const invoicePipeline: InvoicePipelineDeps = { blob, di, foundry, masters: invoiceMasters, dedup: new PersistenceInvoiceDedup(persistence), persistence, autoStage: true };
+    // Invoice-specific Foundry client (invoice prompt), with the same few-shot learning wrap. DI stays
+    // the shared layout extractor — Foundry does the invoice-field structuring from the OCR layout.
+    const invoiceFoundry = createAzureInvoiceFoundryClient({
+      wrapCompleter: (c) =>
+        new FewShotCompleter(c, async () => {
+          const rows = await persistence.listCorrections({ limit: 8 });
+          return rows.map((r) => ({ field: r.fieldPath, from: r.originalValue, to: r.correctedValue, kind: r.kind }));
+        }),
+    });
+    const invoicePipeline: InvoicePipelineDeps = { blob, di, foundry: invoiceFoundry, masters: invoiceMasters, dedup: new PersistenceInvoiceDedup(persistence), persistence, autoStage: true };
     const invoiceWorker = new InvoiceIngestionWorker({ client: createDefaultGraphApiClient(), mailbox: apMailbox, pipeline: invoicePipeline });
     const apQueue = createServiceBusIngestionQueue({ fullyQualifiedNamespace: requireEnv("SERVICEBUS_NAMESPACE"), queueName: process.env.AP_INGESTION_QUEUE_NAME ?? "ingestion-ap" });
     runIngestionConsumer(apQueue, invoiceWorker);
