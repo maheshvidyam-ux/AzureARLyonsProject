@@ -11,8 +11,9 @@ import { OrderDetail } from "./views/OrderDetail.js";
 import { InvoiceQueue } from "./views/InvoiceQueue.js";
 import { InvoiceDetail } from "./views/InvoiceDetail.js";
 import { Settings } from "./views/Settings.js";
+import { UploadModal } from "./components/UploadModal.js";
 import { useToast, ToastHost } from "./components/Toast.js";
-import type { AppRole } from "./api/contract.js";
+import type { AppRole, UploadResult } from "./api/contract.js";
 
 type Route =
   | { name: "dashboard" }
@@ -25,7 +26,15 @@ type Route =
 export function App(): JSX.Element {
   const { role, setRole } = useAuth();
   const [route, setRoute] = useState<Route>({ name: "dashboard" });
+  const [uploadOpen, setUploadOpen] = useState(false);
   const { toast, notify } = useToast();
+
+  const onUploaded = useCallback((r: UploadResult) => {
+    setUploadOpen(false);
+    if (!r.referenceId) return;
+    if (r.module === "AP_INVOICE") setRoute({ name: "invoice", id: r.referenceId, label: r.reference ?? r.referenceId });
+    else setRoute({ name: "detail", id: r.referenceId, po: r.reference ?? r.referenceId });
+  }, []);
 
   const goDashboard = useCallback(() => setRoute({ name: "dashboard" }), []);
   const openOrder = useCallback((id: string, po: string) => setRoute({ name: "detail", id, po }), []);
@@ -88,6 +97,10 @@ export function App(): JSX.Element {
             )}
           </div>
           <div className="sp" />
+          <button className="upbtn" title="Upload a document to process" onClick={() => setUploadOpen(true)}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 15V4" /><path d="M7 9l5-5 5 5" /><path d="M5 19h14" /></svg>
+            Upload
+          </button>
           <label className="rolesel">
             Role:{" "}
             <select value={role} onChange={(e) => setRole(e.target.value as AppRole)} aria-label="Dev role">
@@ -111,6 +124,7 @@ export function App(): JSX.Element {
         </div>
       </div>
 
+      <UploadModal open={uploadOpen} onClose={() => setUploadOpen(false)} onUploaded={onUploaded} notify={notify} />
       <ToastHost toast={toast} />
     </div>
   );

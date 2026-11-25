@@ -154,6 +154,24 @@ table.citems input.q{text-align:right;}
 .hint{font-size:11.5px;color:var(--muted);text-align:center;min-height:15px;}
 .hint.bad{color:var(--crit);}
 
+/* upload button + modal */
+.upbtn{display:inline-flex;align-items:center;gap:7px;background:var(--accent);color:#fff;border:none;border-radius:7px;padding:8px 13px;font-size:13px;font-weight:600;}
+.upbtn:hover{background:var(--accent-ink);} .upbtn svg{width:16px;height:16px;}
+.modalwrap{position:fixed;inset:0;background:rgba(22,27,36,.44);display:grid;place-items:center;z-index:80;}
+.modal{background:var(--card);border-radius:12px;box-shadow:0 20px 60px rgba(22,27,36,.3);width:min(480px,92vw);overflow:hidden;}
+.modal .mh{padding:16px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;}
+.modal .mh h3{margin:0;font-size:16px;} .modal .mh .x{margin-left:auto;border:none;background:none;color:var(--muted);font-size:18px;line-height:1;padding:4px;}
+.modal .mb{padding:18px 20px;display:grid;gap:16px;}
+.modal .mf{padding:14px 20px;border-top:1px solid var(--line);display:flex;gap:10px;justify-content:flex-end;background:var(--panel);}
+.fldlab{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:7px;display:block;}
+.seg{display:grid;grid-template-columns:1fr 1fr;gap:6px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:4px;}
+.seg-btn{border:none;background:none;border-radius:6px;padding:9px 11px;font-size:13px;font-weight:600;color:var(--ink-soft);display:flex;flex-direction:column;gap:2px;align-items:flex-start;text-align:left;}
+.seg-btn small{font-weight:400;color:var(--muted);font-size:11px;}
+.seg-btn[aria-pressed="true"]{background:var(--card);color:var(--accent-ink);box-shadow:var(--shadow);}
+.drop{border:1.5px dashed var(--line);border-radius:9px;padding:20px;text-align:center;color:var(--muted);font-size:13px;background:var(--panel);cursor:pointer;display:block;}
+.drop:hover,.drop.has{border-color:var(--accent);background:var(--accent-wash);color:var(--accent-ink);}
+.drop.has{border-style:solid;font-weight:600;} .drop .fn{font-family:var(--mono);}
+
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(14px);opacity:0;background:var(--ink);color:#fff;padding:10px 16px;border-radius:8px;font-size:13px;box-shadow:var(--shadow);pointer-events:none;transition:opacity .22s,transform .22s;z-index:70;}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
 

@@ -14,12 +14,43 @@ import { buildServer } from "../api/src/server.js";
 import { processAttachment, type PipelineDeps } from "../workers/src/pipeline/pipeline.js";
 import { InMemoryInvoiceDedup, processInvoice, type InvoicePipelineDeps } from "../workers/src/invoice/index.js";
 import type { GraphMailMessage } from "../workers/src/pipeline/ports.js";
+import { PipelineUploadProcessor } from "../api/src/upload.js";
 import { InMemoryBlobStore } from "../../mocks/blob/in-memory-blob.js";
 import { MockDocumentIntelligenceClient, MockFoundryClient } from "../../mocks/ai/mock-ai-clients.js";
 import { SAMPLE_CUSTOMERS, SAMPLE_ITEMS } from "../../mocks/fabric/sample-masters.js";
 import { SAMPLE_VENDORS, SAMPLE_PO_LINES, SAMPLE_RECEIPTS } from "../../mocks/fabric/sample-invoice-masters.js";
+import type { BlobRef, DiLayoutResult, DocumentIntelligenceClient, FoundryClient, FoundryResult } from "../workers/src/pipeline/ports.js";
 
 const PORT = 5174;
+
+/**
+ * DEV ONLY. The mock DI/Foundry key off the sample-file stem, so a real uploaded PDF (any filename)
+ * has no fixture. These wrappers map an upload to a representative fixture and stamp a per-file-unique
+ * PO/invoice number (from the content hash) so each upload becomes its own fresh review item instead
+ * of colliding on the duplicate key. In production the real DI/Foundry read the actual bytes.
+ */
+const withStem = (blob: BlobRef, stem: string): BlobRef => ({ ...blob, filename: `${stem}.pdf` });
+class SampleMappingDi implements DocumentIntelligenceClient {
+  constructor(private readonly base: DocumentIntelligenceClient, private readonly stem: string) {}
+  analyze(input: { blob: BlobRef }): Promise<DiLayoutResult> {
+    return this.base.analyze({ blob: withStem(input.blob, this.stem) });
+  }
+}
+class SampleMappingFoundry implements FoundryClient {
+  constructor(private readonly base: FoundryClient, private readonly stem: string) {}
+  async interpret(input: { di: DiLayoutResult; blob: BlobRef }): Promise<FoundryResult> {
+    const res = await this.base.interpret({ di: input.di, blob: withStem(input.blob, this.stem) });
+    const suffix = (input.blob.contentHash || "000000").slice(0, 6).toUpperCase();
+    try {
+      const d = JSON.parse(res.rawJson);
+      if (d?.header?.customer_po_number) d.header.customer_po_number = { ...d.header.customer_po_number, value: `UP-${suffix}` };
+      if (d?.header?.invoice_number) d.header.invoice_number = { ...d.header.invoice_number, value: `UP-${suffix}` };
+      return { ...res, rawJson: JSON.stringify(d) };
+    } catch {
+      return res;
+    }
+  }
+}
 
 function mail(stem: string, id: string, sender: string): GraphMailMessage {
   return {
@@ -84,7 +115,29 @@ async function main(): Promise<void> {
   }
   console.log(`seeded ${(await persistence.listInvoices({})).length} invoices`);
 
+  // Manual upload intake (POST /uploads): run uploaded PDFs through the real pipeline. In dev the
+  // sample-mapping DI/Foundry turn any uploaded file into a fresh review item (AR → unmatched order,
+  // AP → Non-PO Code-&-Approve), each with a unique PO/invoice number.
+  const uploads = new PipelineUploadProcessor({
+    order: {
+      blob: new InMemoryBlobStore(),
+      persistence,
+      masters,
+      di: new SampleMappingDi(new MockDocumentIntelligenceClient(), "sample-po-002"),
+      foundry: new SampleMappingFoundry(new MockFoundryClient(), "sample-po-002"),
+    },
+    invoice: {
+      blob: new InMemoryBlobStore(),
+      persistence,
+      masters: invoiceDeps.masters,
+      dedup: invoiceDeps.dedup,
+      di: new SampleMappingDi(new MockDocumentIntelligenceClient(), "sample-inv-nonpo-001"),
+      foundry: new SampleMappingFoundry(new MockFoundryClient(), "sample-inv-nonpo-001"),
+    },
+  });
+
   const app = await buildServer({
+    uploads,
     graphClientState: "dev",
     graph: { async enqueueMessageIds() {} },
     persistence,

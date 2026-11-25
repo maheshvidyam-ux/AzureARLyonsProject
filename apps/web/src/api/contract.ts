@@ -159,6 +159,17 @@ export interface UpdateInvoiceInput {
   lines?: InvoiceLinePatch[];
 }
 
+/** Result of POST /uploads — mirrors apps/api/src/upload.ts UploadOutcome. */
+export interface UploadResult {
+  module: string;
+  decision: string;
+  internalState: string;
+  referenceId: string | null;
+  documentId: string | null;
+  reference: string | null;
+  findings: Array<{ code: string; severity: string; blocking: boolean }>;
+}
+
 /** App roles — mirrors apps/api/src/auth.ts. */
 export type AppRole = "Administrator" | "OrderProcessor" | "Supervisor" | "Viewer" | "IntegrationService";
 export const WRITE_ROLES: AppRole[] = ["OrderProcessor", "Supervisor", "Administrator"];

@@ -7,7 +7,9 @@
  * In dev the base is "/api" (Vite proxies to the seeded in-memory API). Auth is the DEV header
  * authenticator today; swapping to an Entra bearer token is a one-line change to authHeaders().
  */
-import type { OrderReviewDetail, OrderSummaryRow, UpdateOrderInput, AppRole, ConnectionsConfig, ConnectionsResponse, ConnectionTestResult, InvoiceSummaryRow, InvoiceReviewDetail, UpdateInvoiceInput } from "./contract.js";
+import type { OrderReviewDetail, OrderSummaryRow, UpdateOrderInput, AppRole, ConnectionsConfig, ConnectionsResponse, ConnectionTestResult, InvoiceSummaryRow, InvoiceReviewDetail, UpdateInvoiceInput, UploadResult } from "./contract.js";
+
+export type UploadModule = "ORDER_PROCESSING" | "AP_INVOICE";
 
 const BASE = "/api";
 
@@ -108,6 +110,13 @@ export function approveInvoice(id: Identity, invoiceId: string, rowVersion: numb
 }
 export function rejectInvoice(id: Identity, invoiceId: string, rowVersion: number): Promise<number> {
   return mutate(id, `${BASE}/invoices/${encodeURIComponent(invoiceId)}/reject`, rowVersion);
+}
+
+// --- manual upload ---
+export async function uploadDocument(id: Identity, body: { module: UploadModule; filename: string; contentBase64: string }): Promise<UploadResult> {
+  const res = await fetch(`${BASE}/uploads`, { method: "POST", headers: { ...authHeaders(id), "content-type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) throw new ApiError(res.status, await readError(res));
+  return (await res.json()) as UploadResult;
 }
 
 // --- settings / connections (Administrator) ---
