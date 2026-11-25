@@ -119,9 +119,35 @@ module "container_apps" {
   app_insights_connection_string = module.monitor.app_insights_connection_string
 
   apps = {
-    web     = { identity_id = module.identity.identity_ids["web"], target_port = 80, external = true }
-    api     = { identity_id = module.identity.identity_ids["api"], target_port = 80, external = true }
-    workers = { identity_id = module.identity.identity_ids["workers"] }
+    web = { identity_id = module.identity.identity_ids["web"], target_port = 80, external = true }
+    # API hosts the Graph notification webhook: it publishes AR message ids to `ingestion` and
+    # AP message ids to `ingestion-ap` (routing is by the subscription's clientState).
+    api = {
+      identity_id = module.identity.identity_ids["api"]
+      target_port = 80
+      external    = true
+      env = {
+        SERVICEBUS_NAMESPACE    = module.servicebus.namespace_endpoint
+        INGESTION_QUEUE_NAME    = "ingestion"
+        AP_INGESTION_QUEUE_NAME = "ingestion-ap"
+      }
+    }
+    # Workers run the AR order pipeline (ingestion queue + MAILBOX) and, when AP_MAILBOX is set,
+    # the AP invoice pipeline on the ingestion-ap queue. Secrets + the Fabric/AI/Lakehouse
+    # coordinates are injected the same way (Key Vault secret refs) alongside these when real
+    # images are wired — they are intentionally omitted from the Phase-1 placeholder deploy.
+    workers = {
+      identity_id = module.identity.identity_ids["workers"]
+      env = merge(
+        {
+          SERVICEBUS_NAMESPACE    = module.servicebus.namespace_endpoint
+          INGESTION_QUEUE_NAME    = "ingestion"
+          AP_INGESTION_QUEUE_NAME = "ingestion-ap"
+        },
+        var.ar_mailbox == "" ? {} : { MAILBOX = var.ar_mailbox },
+        var.ap_mailbox == "" ? {} : { AP_MAILBOX = var.ap_mailbox },
+      )
+    }
   }
 
   tags = local.tags

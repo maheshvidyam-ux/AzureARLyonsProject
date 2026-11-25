@@ -16,6 +16,10 @@ variable "apps" {
     # target_port set => HTTP ingress is enabled on that port
     target_port = optional(number)
     external    = optional(bool, false)
+    # Plain (non-secret) environment variables for the app's container. Entra auth means connection
+    # coordinates (Service Bus namespace, mailboxes, queue names) are NOT secrets. True secrets stay
+    # in Key Vault and are referenced via a `secret {}` block, not here.
+    env = optional(map(string), {})
   }))
 }
 # Phase-1 placeholder: a public hello-world image so an authenticated, empty app deploys to
@@ -69,6 +73,14 @@ resource "azurerm_container_app" "this" {
       env {
         name        = "APPLICATIONINSIGHTS_CONNECTION_STRING"
         secret_name = "appinsights-connection-string"
+      }
+
+      dynamic "env" {
+        for_each = each.value.env
+        content {
+          name  = env.key
+          value = env.value
+        }
       }
     }
   }

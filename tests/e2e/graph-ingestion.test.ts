@@ -111,7 +111,7 @@ describe("notifications", () => {
   });
 
   it("returns an empty result for a malformed payload", () => {
-    expect(parseNotifications(null, "secret")).toEqual({ messageIds: [], lifecycleEvents: [], rejected: 0 });
+    expect(parseNotifications(null, "secret")).toEqual({ messageIds: [], messageIdsByRoute: {}, lifecycleEvents: [], rejected: 0 });
   });
 });
 

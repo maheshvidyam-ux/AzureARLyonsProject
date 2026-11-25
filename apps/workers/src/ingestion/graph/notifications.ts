@@ -31,8 +31,10 @@ export interface ChangeNotification {
 }
 
 export interface ParsedNotifications {
-  /** message ids from clientState-verified change notifications */
+  /** all clientState-verified message ids (flat, across routes) */
   messageIds: string[];
+  /** message ids grouped by route key — the value the matched clientState maps to (AR/AP). */
+  messageIdsByRoute: Record<string, string[]>;
   /** lifecycle events (e.g. reauthorizationRequired, subscriptionRemoved) needing action */
   lifecycleEvents: Array<{ subscriptionId?: string; event: string }>;
   /** count of notifications rejected for a bad/missing clientState */
@@ -40,12 +42,15 @@ export interface ParsedNotifications {
 }
 
 /**
- * Parse a Graph notification payload, verifying `clientState` against the expected secret.
- * Returns the message ids to ingest plus any lifecycle events. Malformed payloads yield an
- * empty result rather than throwing (the webhook must still 202 quickly).
+ * Parse a Graph notification payload, verifying each `clientState` against the expected secret(s).
+ * `expected` is either a single secret (all accepted ids go to route "default") or a map of
+ * clientState → route key (e.g. the AR secret → "AR", the AP secret → "AP"), so one webhook routes
+ * each mailbox's notifications to its own ingestion queue. Malformed payloads yield an empty result
+ * rather than throwing (the webhook must still 202 quickly).
  */
-export function parseNotifications(payload: unknown, expectedClientState: string): ParsedNotifications {
-  const out: ParsedNotifications = { messageIds: [], lifecycleEvents: [], rejected: 0 };
+export function parseNotifications(payload: unknown, expected: string | Record<string, string>): ParsedNotifications {
+  const routes: Record<string, string> = typeof expected === "string" ? { [expected]: "default" } : expected;
+  const out: ParsedNotifications = { messageIds: [], messageIdsByRoute: {}, lifecycleEvents: [], rejected: 0 };
   const value = (payload as { value?: unknown })?.value;
   if (!Array.isArray(value)) return out;
 
@@ -55,12 +60,16 @@ export function parseNotifications(payload: unknown, expectedClientState: string
       out.lifecycleEvents.push({ subscriptionId: raw.subscriptionId, event: raw.lifecycleEvent });
       continue;
     }
-    if (!raw.clientState || raw.clientState !== expectedClientState) {
+    const route = raw.clientState ? routes[raw.clientState] : undefined;
+    if (route === undefined) {
       out.rejected += 1;
       continue;
     }
     const id = raw.resourceData?.id ?? messageIdFromResource(raw.resource);
-    if (id) out.messageIds.push(id);
+    if (id) {
+      out.messageIds.push(id);
+      (out.messageIdsByRoute[route] ??= []).push(id);
+    }
   }
   return out;
 }

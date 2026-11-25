@@ -25,12 +25,15 @@ export async function registerGraphNotificationRoutes(app: FastifyInstance, deps
         return reply.code(v.status).header("content-type", v.contentType).send(v.body);
       }
 
-      // 2. Change notifications.
-      const parsed = parseNotifications(req.body, deps.graphClientState);
+      // 2. Change notifications — routed by clientState: AR → the order queue, AP → ingestion-ap.
+      const routes: Record<string, string> = { [deps.graphClientState]: "AR" };
+      if (deps.graphClientStateAp) routes[deps.graphClientStateAp] = "AP";
+      const parsed = parseNotifications(req.body, routes);
 
-      if (parsed.messageIds.length > 0) {
-        await deps.graph.enqueueMessageIds(parsed.messageIds);
-      }
+      const arIds = parsed.messageIdsByRoute.AR ?? [];
+      const apIds = parsed.messageIdsByRoute.AP ?? [];
+      if (arIds.length > 0) await deps.graph.enqueueMessageIds(arIds);
+      if (apIds.length > 0) await (deps.graphAp ?? deps.graph).enqueueMessageIds(apIds);
       if (parsed.lifecycleEvents.length > 0 && deps.graph.onLifecycleEvents) {
         await deps.graph.onLifecycleEvents(parsed.lifecycleEvents);
       }

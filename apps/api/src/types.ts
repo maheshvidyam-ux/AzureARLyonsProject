@@ -16,9 +16,13 @@ import type { UploadProcessor } from "./upload.js";
 import type { ConnectionTester } from "./settings.js";
 
 export interface ServerDeps {
-  /** Secret set on the Graph subscription; notifications must echo it (spec §3). */
+  /** Secret set on the AR (order-mailbox) Graph subscription; notifications must echo it (spec §3). */
   graphClientState: string;
   graph: GraphNotificationSink;
+  /** Secret set on the AP (invoice-mailbox) subscription; when set, AP notifications route to graphAp. */
+  graphClientStateAp?: string;
+  /** Sink for AP-mailbox notifications (→ the ingestion-ap queue). Falls back to `graph` if unset. */
+  graphAp?: GraphNotificationSink;
   /** When provided, the reviewer workbench routes (/orders) are registered. */
   persistence?: Persistence;
   /** Fabric master-data read model; enables order revalidation (re-matching) in the reviewer. */

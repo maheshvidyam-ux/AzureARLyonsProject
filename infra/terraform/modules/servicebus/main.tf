@@ -7,8 +7,8 @@ variable "sku" {
 }
 variable "queues" {
   type        = set(string)
-  description = "Durable work queues; each gets dead-lettering on expiry."
-  default     = ["ingestion", "extraction", "interpretation", "validation", "publishing"]
+  description = "Durable work queues; each gets dead-lettering on expiry. 'ingestion' = AR orders, 'ingestion-ap' = AP vendor invoices (separate mailbox → separate queue)."
+  default     = ["ingestion", "ingestion-ap", "extraction", "interpretation", "validation", "publishing"]
 }
 variable "sender_receiver_principal_ids" {
   type        = map(string)

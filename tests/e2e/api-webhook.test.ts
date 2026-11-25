@@ -70,6 +70,45 @@ describe("Graph webhook", () => {
   });
 });
 
+describe("Graph webhook — AR/AP routing", () => {
+  it("routes notifications to the AR or AP sink by clientState", async () => {
+    const AR: string[][] = [];
+    const AP: string[][] = [];
+    const routed = await buildServer({
+      graphClientState: "ar-secret",
+      graph: { async enqueueMessageIds(ids) { AR.push(ids); } },
+      graphClientStateAp: "ap-secret",
+      graphAp: { async enqueueMessageIds(ids) { AP.push(ids); } },
+      logger: false,
+    });
+    const res = await routed.inject({
+      method: "POST",
+      url: URL,
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({
+        value: [
+          { clientState: "ar-secret", resourceData: { id: "ar-1" } },
+          { clientState: "ap-secret", resourceData: { id: "ap-1" } },
+          { clientState: "ap-secret", resource: "Users/u/Messages/ap-2" },
+          { clientState: "WRONG", resourceData: { id: "spoof" } },
+        ],
+      }),
+    });
+    expect(res.statusCode).toBe(202);
+    expect(AR).toEqual([["ar-1"]]);
+    expect(AP).toEqual([["ap-1", "ap-2"]]);
+    await routed.close();
+  });
+
+  it("falls back to the AR sink for AP ids when no AP sink is wired", async () => {
+    const AR: string[][] = [];
+    const routed = await buildServer({ graphClientState: "ar-secret", graph: { async enqueueMessageIds(ids) { AR.push(ids); } }, graphClientStateAp: "ap-secret", logger: false });
+    await routed.inject({ method: "POST", url: URL, headers: { "content-type": "application/json" }, payload: JSON.stringify({ value: [{ clientState: "ap-secret", resourceData: { id: "ap-9" } }] }) });
+    expect(AR).toEqual([["ap-9"]]);
+    await routed.close();
+  });
+});
+
 describe("health", () => {
   it("GET /health and /ready return ok", async () => {
     expect((await app.inject({ method: "GET", url: "/health" })).json()).toEqual({ status: "ok" });

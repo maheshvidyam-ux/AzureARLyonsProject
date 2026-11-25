@@ -5,13 +5,15 @@
  */
 import { createServiceBusIngestionQueue, type IngestionPublisher } from "@coa/messaging";
 
-export function resolveIngestionPublisher(env: NodeJS.ProcessEnv = process.env): IngestionPublisher {
+export function resolveIngestionPublisher(env: NodeJS.ProcessEnv = process.env, queueName?: string): IngestionPublisher {
   if (env.SERVICEBUS_NAMESPACE) {
-    return createServiceBusIngestionQueue();
+    return queueName
+      ? createServiceBusIngestionQueue({ fullyQualifiedNamespace: env.SERVICEBUS_NAMESPACE, queueName })
+      : createServiceBusIngestionQueue();
   }
   return {
     async publish(message) {
-      console.log(`[graph] (no Service Bus configured) would enqueue message id ${message.messageId}`);
+      console.log(`[graph] (no Service Bus configured) would enqueue message id ${message.messageId} to ${queueName ?? env.INGESTION_QUEUE_NAME ?? "ingestion"}`);
     },
     async close() {
       /* no-op */

@@ -24,11 +24,25 @@ async function main(): Promise<void> {
     },
   };
 
+  // AP invoices — when the AP subscription secret is configured, AP-mailbox notifications are
+  // published to the separate `ingestion-ap` queue (consumed by the invoice worker).
+  let graphAp: GraphNotificationSink | undefined;
+  if (config.graphClientStateAp) {
+    const apPublisher = resolveIngestionPublisher(process.env, process.env.AP_INGESTION_QUEUE_NAME ?? "ingestion-ap");
+    graphAp = { async enqueueMessageIds(ids) { for (const id of ids) await apPublisher.publish({ messageId: id }); } };
+  }
+
   // NOTE: the reviewer workbench routes (/orders) are intentionally NOT wired here yet. They
   // require the real Entra OIDC authenticator (a later slice) — serving them with the DEV
   // header authenticator on a network-reachable endpoint would be a security hole (spec §3).
   // They are fully built + tested via buildServer({ persistence, authenticate }).
-  const app = await buildServer({ graphClientState: config.graphClientState, graph, logger: true });
+  const app = await buildServer({
+    graphClientState: config.graphClientState,
+    graph,
+    ...(config.graphClientStateAp ? { graphClientStateAp: config.graphClientStateAp } : {}),
+    ...(graphAp ? { graphAp } : {}),
+    logger: true,
+  });
 
   await app.listen({ host: config.host, port: config.port });
 }
