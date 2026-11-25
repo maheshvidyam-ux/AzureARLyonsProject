@@ -9,6 +9,7 @@ import { approveInvoice, getInvoice, patchInvoice, rejectInvoice, ApiError, Conf
 import type { InvoiceLineDetail, InvoiceReviewDetail, UpdateInvoiceInput } from "../api/contract.js";
 import { useAuth } from "../auth/AuthContext.js";
 import { StatusChip } from "../components/StatusChip.js";
+import { DocumentScan } from "../components/DocumentScan.js";
 import { isTerminal, matchBadge, money } from "../lib/status.js";
 import type { Notify } from "../components/Toast.js";
 
@@ -36,6 +37,7 @@ export function InvoiceDetail({ invoiceId, onBack, notify }: { invoiceId: string
   const [lines, setLines] = useState<InvoiceLineDetail[]>([]);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [showJson, setShowJson] = useState(false);
 
   const load = useCallback(() => {
     setDetail(null);
@@ -264,20 +266,30 @@ export function InvoiceDetail({ invoiceId, onBack, notify }: { invoiceId: string
 
         <div className="imgpane">
           <div className="imgtool">
-            <span className="fname">{h.id}.json</span>
+            <span className="fname">{h.invoiceNumber ?? h.id}.pdf</span>
             <span>·</span>
-            <span>normalized evidence</span>
+            <span>vendor invoice</span>
             <span>·</span>
-            <span style={{ color: "var(--muted)" }}>total {money(h.grandTotal)} {h.currency ?? ""}</span>
+            <span style={{ color: "var(--muted)" }}>page 1 / 1</span>
           </div>
-          <div className="scan">
-            <h5>Document evidence (normalized invoice)</h5>
-            {detail.normalized == null ? (
-              <p style={{ color: "#b44", fontSize: 12.5 }}>No normalized evidence available.</p>
-            ) : (
-              <pre>{JSON.stringify(detail.normalized, null, 2)}</pre>
-            )}
-          </div>
+          <DocumentScan
+            docType="INVOICE"
+            partyName={h.vendorName ?? h.erpVendorAccount ?? "Vendor"}
+            number={h.invoiceNumber ?? "—"}
+            date={h.invoiceDate}
+            leftHeader="Code"
+            fields={[
+              { k: "Bill to", v: "Lyons Magnus · Accounts Payable" },
+              { k: "PO reference", v: h.poNumber ?? "— none (Non-PO) —" },
+              { k: "Invoice date", v: h.invoiceDate ?? "—" },
+              { k: "Currency", v: h.currency ?? "—" },
+            ]}
+            lines={lines.map((l) => ({ left: l.poLineRef ?? (l.isCodeAndApprove ? "C&A" : null), desc: l.description, qty: l.quantity, uom: null, unit: l.unitPrice, amount: l.amount }))}
+            total={h.grandTotal}
+            currency={h.currency}
+          />
+          <div className="evtoggle"><button onClick={() => setShowJson((s) => !s)}>{showJson ? "Hide" : "View"} extracted data (JSON)</button></div>
+          {showJson && <div className="evjson"><pre>{JSON.stringify(detail.normalized, null, 2)}</pre></div>}
         </div>
       </div>
     </Shell>

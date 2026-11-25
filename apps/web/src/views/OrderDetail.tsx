@@ -9,7 +9,8 @@ import { approveOrder, getOrder, patchOrder, rejectOrder, revalidateOrder, ApiEr
 import type { OrderLineDetail, OrderReviewDetail, UpdateOrderInput } from "../api/contract.js";
 import { useAuth } from "../auth/AuthContext.js";
 import { StatusChip } from "../components/StatusChip.js";
-import { isTerminal, money } from "../lib/status.js";
+import { DocumentScan } from "../components/DocumentScan.js";
+import { isTerminal } from "../lib/status.js";
 import type { Notify } from "../components/Toast.js";
 
 interface HeaderForm {
@@ -31,6 +32,16 @@ const toForm = (d: OrderReviewDetail): HeaderForm => ({
 });
 const nullable = (s: string): string | null => (s.trim() === "" ? null : s);
 
+/** Safe reads over the stored normalized PO for the document facsimile (customer name, line descriptions). */
+function customerName(normalized: unknown): string | null {
+  const v = (normalized as { header?: { customer?: { name?: { value?: unknown } } } } | null)?.header?.customer?.name?.value;
+  return typeof v === "string" ? v : null;
+}
+function lineDescription(normalized: unknown, i: number): string | null {
+  const v = (normalized as { lines?: Array<{ description?: { value?: unknown } }> } | null)?.lines?.[i]?.description?.value;
+  return typeof v === "string" ? v : null;
+}
+
 export function OrderDetail({ orderId, onBack, notify }: { orderId: string; onBack: () => void; notify: Notify }): JSX.Element {
   const { identity, canWrite } = useAuth();
   const [detail, setDetail] = useState<OrderReviewDetail | null>(null);
@@ -39,6 +50,7 @@ export function OrderDetail({ orderId, onBack, notify }: { orderId: string; onBa
   const [lines, setLines] = useState<OrderLineDetail[]>([]);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [showJson, setShowJson] = useState(false);
 
   const load = useCallback(() => {
     setDetail(null);
@@ -258,20 +270,30 @@ export function OrderDetail({ orderId, onBack, notify }: { orderId: string; onBa
 
         <div className="imgpane">
           <div className="imgtool">
-            <span className="fname">{h.id}.json</span>
+            <span className="fname">{h.customerPoNumber ?? h.id}.pdf</span>
             <span>·</span>
-            <span>normalized evidence</span>
+            <span>customer purchase order</span>
             <span>·</span>
-            <span style={{ color: "var(--muted)" }}>total {money(h.total)} {h.currency ?? ""}</span>
+            <span style={{ color: "var(--muted)" }}>page 1 / 1</span>
           </div>
-          <div className="scan">
-            <h5>Document evidence (normalized PO)</h5>
-            {detail.normalized == null ? (
-              <p style={{ color: "#b44", fontSize: 12.5 }}>No normalized evidence is available for this document.</p>
-            ) : (
-              <pre>{JSON.stringify(detail.normalized, null, 2)}</pre>
-            )}
-          </div>
+          <DocumentScan
+            docType="PURCHASE ORDER"
+            partyName={customerName(detail.normalized) ?? h.erpCustomerAccount ?? "Customer"}
+            number={h.customerPoNumber ?? "—"}
+            date={h.poDate}
+            leftHeader="Item"
+            fields={[
+              { k: "Ship to", v: h.shipTo ?? "—" },
+              { k: "Bill to", v: h.billTo ?? "—" },
+              { k: "PO date", v: h.poDate ?? "— not stated —" },
+              { k: "Currency", v: h.currency ?? "—" },
+            ]}
+            lines={lines.map((l, i) => ({ left: l.customerItemCode, desc: lineDescription(detail.normalized, i) ?? l.customerItemCode, qty: l.quantity, uom: l.uom, unit: l.unitPrice, amount: l.extendedAmount }))}
+            total={h.total}
+            currency={h.currency}
+          />
+          <div className="evtoggle"><button onClick={() => setShowJson((s) => !s)}>{showJson ? "Hide" : "View"} extracted data (JSON)</button></div>
+          {showJson && <div className="evjson"><pre>{JSON.stringify(detail.normalized, null, 2)}</pre></div>}
         </div>
       </div>
     </DetailShell>
