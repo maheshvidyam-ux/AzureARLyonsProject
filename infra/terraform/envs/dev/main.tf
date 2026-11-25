@@ -19,6 +19,17 @@ locals {
   worker_principals = {
     for k, v in module.identity.principal_ids : k => v if contains(["api", "workers"], k)
   }
+
+  # Env shared by the workers app (queue consumers) and the scheduled poll job (queue producer).
+  worker_env = merge(
+    {
+      SERVICEBUS_NAMESPACE    = module.servicebus.namespace_endpoint
+      INGESTION_QUEUE_NAME    = "ingestion"
+      AP_INGESTION_QUEUE_NAME = "ingestion-ap"
+    },
+    var.ar_mailbox == "" ? {} : { MAILBOX = var.ar_mailbox },
+    var.ap_mailbox == "" ? {} : { AP_MAILBOX = var.ap_mailbox },
+  )
 }
 
 resource "azurerm_resource_group" "this" {
@@ -138,15 +149,19 @@ module "container_apps" {
     # images are wired — they are intentionally omitted from the Phase-1 placeholder deploy.
     workers = {
       identity_id = module.identity.identity_ids["workers"]
-      env = merge(
-        {
-          SERVICEBUS_NAMESPACE    = module.servicebus.namespace_endpoint
-          INGESTION_QUEUE_NAME    = "ingestion"
-          AP_INGESTION_QUEUE_NAME = "ingestion-ap"
-        },
-        var.ar_mailbox == "" ? {} : { MAILBOX = var.ar_mailbox },
-        var.ap_mailbox == "" ? {} : { AP_MAILBOX = var.ap_mailbox },
-      )
+      env         = local.worker_env
+    }
+  }
+
+  # Scheduled no-loss mailbox poll (delta-query cursor) — the primary ingestion mechanism. Enqueues
+  # new message ids to ingestion / ingestion-ap for the workers to process. Placeholder command runs
+  # cleanly on the hello-world image; the real image overrides it with the poll CLI (Phase 2).
+  jobs = {
+    poll = {
+      identity_id = module.identity.identity_ids["workers"]
+      cron        = "*/5 * * * *"
+      command     = ["/bin/sh", "-c", "echo 'mailbox poll placeholder — real image runs: node apps/workers/src/ingestion/poll-cli.js'; exit 0"]
+      env         = local.worker_env
     }
   }
 

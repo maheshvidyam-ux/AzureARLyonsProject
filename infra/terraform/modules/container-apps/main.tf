@@ -22,6 +22,18 @@ variable "apps" {
     env = optional(map(string), {})
   }))
 }
+variable "jobs" {
+  type = map(object({
+    identity_id = string
+    cron        = string                      # UNIX cron, e.g. "*/5 * * * *"
+    command     = optional(list(string))      # container entrypoint override (e.g. the poll CLI)
+    args        = optional(list(string))
+    timeout     = optional(number, 600)        # replica_timeout_in_seconds
+    env         = optional(map(string), {})
+  }))
+  default     = {}
+  description = "Scheduled (cron) Container App Jobs — e.g. the no-loss mailbox poll."
+}
 # Phase-1 placeholder: a public hello-world image so an authenticated, empty app deploys to
 # dev (phase exit criterion). Real images move to ACR with a `registry {}` block in Phase 2.
 variable "placeholder_image" {
@@ -98,6 +110,58 @@ resource "azurerm_container_app" "this" {
       }
     }
   }
+}
+
+resource "azurerm_container_app_job" "this" {
+  for_each                     = var.jobs
+  name                         = "caj-${var.name_prefix}-${each.key}"
+  location                     = var.location
+  resource_group_name          = var.resource_group_name
+  container_app_environment_id = azurerm_container_app_environment.this.id
+
+  replica_timeout_in_seconds = each.value.timeout
+  replica_retry_limit        = 1
+
+  schedule_trigger_config {
+    cron_expression          = each.value.cron
+    parallelism              = 1
+    replica_completion_count = 1
+  }
+
+  identity {
+    type         = "UserAssigned"
+    identity_ids = [each.value.identity_id]
+  }
+
+  secret {
+    name  = "appinsights-connection-string"
+    value = var.app_insights_connection_string
+  }
+
+  template {
+    container {
+      name    = each.key
+      image   = var.placeholder_image
+      cpu     = 0.25
+      memory  = "0.5Gi"
+      command = each.value.command
+      args    = each.value.args
+
+      env {
+        name        = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+        secret_name = "appinsights-connection-string"
+      }
+      dynamic "env" {
+        for_each = each.value.env
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+    }
+  }
+
+  tags = var.tags
 }
 
 output "environment_id" { value = azurerm_container_app_environment.this.id }

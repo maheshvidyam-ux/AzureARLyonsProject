@@ -60,6 +60,40 @@ export class GraphMailboxSource {
   }
 
   /**
+   * Scheduled-poll path (no-loss): delta sweep returning just the NEW message ids (those with
+   * attachments) + the new delta link, WITHOUT advancing the stored cursor. The caller enqueues the
+   * ids and then calls `commitCursor` — so if the enqueue fails, the cursor is not advanced and the
+   * same messages are returned on the next poll (no email is lost). No attachment fetch here; the
+   * worker fetches attachments when it processes each id.
+   */
+  async fetchNewMessageIds(): Promise<{ messageIds: string[]; deltaLink: string | null }> {
+    const ids: string[] = [];
+    let link: string | undefined = (await this.deltaStore.get(this.cursorKey)) ?? undefined;
+    let deltaLink: string | null = null;
+
+    for (let page = 0; page < this.maxPages; page++) {
+      const result = await this.client.getDeltaPage({ link, mailbox: this.mailbox, folder: this.folder });
+      for (const m of result.messages) {
+        if (m["@removed"]) continue; // deletion/move — not a new document
+        if (!m.hasAttachments) continue; // documents arrive as attachments
+        if (m.id) ids.push(m.id);
+      }
+      if (result.nextLink) {
+        link = result.nextLink;
+        continue;
+      }
+      deltaLink = result.deltaLink ?? null;
+      break;
+    }
+    return { messageIds: ids, deltaLink };
+  }
+
+  /** Persist the delta cursor — call ONLY after the swept ids have been durably enqueued. */
+  async commitCursor(deltaLink: string): Promise<void> {
+    await this.deltaStore.set(this.cursorKey, deltaLink);
+  }
+
+  /**
    * Delta sweep from the stored cursor (or a full enumeration on first run). Returns the mapped
    * messages and the new delta link (also persisted). Removed/deleted items are skipped.
    */

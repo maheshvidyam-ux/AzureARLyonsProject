@@ -46,7 +46,25 @@ This wires `MAILBOX` / `AP_MAILBOX` + `SERVICEBUS_NAMESPACE` + `INGESTION_QUEUE_
 The invoice master reader reads the **vendor/PO tables + columns** configured in the admin
 **Settings → Connections** screen (persisted in `app_config`); edit them there, not in env.
 
-## 3. Create the AP Graph subscription
+## 3. Ingestion mechanism — scheduled polling (primary, no-loss)
+
+**Polling is the primary mechanism** (preferred over webhooks for high volume + zero email loss):
+Graph change-notification webhooks are best-effort (Microsoft can drop them), whereas a **delta-query
+sweep from a durable cursor** is complete and resumable.
+
+- A **scheduled Container App Job** (`jobs.poll`, cron `*/5 * * * *`) runs `poll-cli`, which for each
+  mailbox (`MAILBOX`, `AP_MAILBOX`) delta-sweeps new message ids and enqueues them to
+  `ingestion` / `ingestion-ap`. The worker then fetches + processes each.
+- **No-loss:** the delta cursor (persisted in `app_config` as `graph-delta:<mailbox>`) advances
+  **only after** a mailbox's ids are enqueued. A failed run doesn't advance it, so the next run
+  re-fetches — and processing is idempotent (content-hash get-or-create), so no duplicate either.
+- The Job's placeholder command is replaced with the real poll entrypoint when the ACR image lands
+  (`node apps/workers/src/ingestion/poll-cli.js`). Tune the cron for your volume/latency.
+
+Webhooks (section below) are **optional** — use them only if you also want near-real-time latency;
+they are not required and add subscription-renewal overhead.
+
+## 4. (Optional) Create the AP Graph subscription — webhook path
 
 A service principal with `Mail.Read` (application) scoped to the AP mailbox via an Exchange
 application-access policy (Q-GRAPH-1):
