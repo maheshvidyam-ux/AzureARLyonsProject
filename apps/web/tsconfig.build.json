@@ -1,0 +1,6 @@
+{
+  // Production build scope: the SPA source only. Excludes dev-api.mts (the local dev harness,
+  // which imports the quarantined mocks/) so the container image build does not need mocks/.
+  "extends": "./tsconfig.json",
+  "include": ["src", "vite.config.ts"]
+}

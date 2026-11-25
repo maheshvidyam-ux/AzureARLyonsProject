@@ -30,6 +30,40 @@ locals {
     var.ar_mailbox == "" ? {} : { MAILBOX = var.ar_mailbox },
     var.ap_mailbox == "" ? {} : { AP_MAILBOX = var.ap_mailbox },
   )
+
+  # Real images from ACR when image_tag is set; otherwise null => the placeholder hello-world image
+  # (so `terraform apply` succeeds before any image is pushed — Phase-1 behaviour is preserved).
+  deploy_images = var.image_tag == "" ? { web = null, api = null, workers = null } : {
+    web     = "${module.acr.login_server}/coa-web:${var.image_tag}"
+    api     = "${module.acr.login_server}/coa-api:${var.image_tag}"
+    workers = "${module.acr.login_server}/coa-workers:${var.image_tag}"
+  }
+
+  # Non-secret connection coordinates shared by api + workers (Entra auth → NOT secrets). Fabric SQL
+  # + Lakehouse endpoints are variables because they are not Terraform attributes of the capacity.
+  app_coordinates = merge(
+    {
+      BLOB_ACCOUNT_URL      = module.blob.primary_blob_endpoint
+      DOC_INTEL_ENDPOINT    = module.ai.doc_intelligence_endpoint
+      AI_FOUNDRY_ENDPOINT   = module.ai.openai_endpoint
+      AI_FOUNDRY_DEPLOYMENT = module.ai.openai_deployment_name
+    },
+    var.fabric_sql_server == "" ? {} : { FABRIC_SQL_SERVER = var.fabric_sql_server },
+    var.fabric_sql_database == "" ? {} : { FABRIC_SQL_DATABASE = var.fabric_sql_database },
+    var.lakehouse_sql_server == "" ? {} : { LAKEHOUSE_SQL_SERVER = var.lakehouse_sql_server },
+    var.lakehouse_sql_database == "" ? {} : { LAKEHOUSE_SQL_DATABASE = var.lakehouse_sql_database },
+    var.ai_foundry_invoice_deployment == "" ? {} : { AI_FOUNDRY_INVOICE_DEPLOYMENT = var.ai_foundry_invoice_deployment },
+  )
+
+  # GRAPH_CLIENT_STATE secret(s) live in Key Vault (set out-of-band: `az keyvault secret set`).
+  # Versionless ids so rotation flows through without a redeploy.
+  graph_secret_env = merge(
+    { GRAPH_CLIENT_STATE = "${module.keyvault.key_vault_uri}secrets/graph-client-state" },
+    var.ap_mailbox == "" ? {} : { GRAPH_CLIENT_STATE_AP = "${module.keyvault.key_vault_uri}secrets/graph-client-state-ap" },
+  )
+
+  # Internal URL the public web app's nginx proxies /api → (same Container Apps environment).
+  api_internal_url = "http://ca-${local.name_prefix}-api"
 }
 
 resource "azurerm_resource_group" "this" {
@@ -129,39 +163,54 @@ module "container_apps" {
   infrastructure_subnet_id       = module.network.apps_subnet_id
   app_insights_connection_string = module.monitor.app_insights_connection_string
 
+  # Pull real images from ACR via managed identity once image_tag is set.
+  registry_server = var.image_tag == "" ? null : module.acr.login_server
+
   apps = {
-    web = { identity_id = module.identity.identity_ids["web"], target_port = 80, external = true }
-    # API hosts the Graph notification webhook: it publishes AR message ids to `ingestion` and
-    # AP message ids to `ingestion-ap` (routing is by the subscription's clientState).
+    # Public entry: serves the SPA + Entra Easy Auth, reverse-proxies /api to the internal API.
+    web = {
+      identity_id = module.identity.identity_ids["web"]
+      image       = local.deploy_images.web
+      target_port = 8080
+      external    = true
+      env         = { API_UPSTREAM = local.api_internal_url }
+    }
+    # Reviewer/upload/settings API — INTERNAL ingress only. It trusts the Easy Auth identity header
+    # forwarded by the web app, so it must not be publicly reachable. Ingestion is via the poll job
+    # (polling is primary), so no public Graph webhook is required.
     api = {
       identity_id = module.identity.identity_ids["api"]
-      target_port = 80
-      external    = true
-      env = {
+      image       = local.deploy_images.api
+      target_port = 8080
+      external    = false
+      env = merge(local.app_coordinates, {
         SERVICEBUS_NAMESPACE    = module.servicebus.namespace_endpoint
         INGESTION_QUEUE_NAME    = "ingestion"
         AP_INGESTION_QUEUE_NAME = "ingestion-ap"
-      }
+      })
+      secret_env = local.graph_secret_env
     }
     # Workers run the AR order pipeline (ingestion queue + MAILBOX) and, when AP_MAILBOX is set,
-    # the AP invoice pipeline on the ingestion-ap queue. Secrets + the Fabric/AI/Lakehouse
-    # coordinates are injected the same way (Key Vault secret refs) alongside these when real
-    # images are wired — they are intentionally omitted from the Phase-1 placeholder deploy.
+    # the AP invoice pipeline on the ingestion-ap queue, against the live Fabric/AI/Lakehouse coords.
     workers = {
       identity_id = module.identity.identity_ids["workers"]
-      env         = local.worker_env
+      image       = local.deploy_images.workers
+      env         = merge(local.worker_env, local.app_coordinates)
     }
   }
 
   # Scheduled no-loss mailbox poll (delta-query cursor) — the primary ingestion mechanism. Enqueues
-  # new message ids to ingestion / ingestion-ap for the workers to process. Placeholder command runs
-  # cleanly on the hello-world image; the real image overrides it with the poll CLI (Phase 2).
+  # new message ids to ingestion / ingestion-ap for the workers to process. With a placeholder image
+  # it echoes; with the real workers image it runs the poll CLI.
   jobs = {
     poll = {
       identity_id = module.identity.identity_ids["workers"]
+      image       = local.deploy_images.workers
       cron        = "*/5 * * * *"
-      command     = ["/bin/sh", "-c", "echo 'mailbox poll placeholder — real image runs: node apps/workers/src/ingestion/poll-cli.js'; exit 0"]
-      env         = local.worker_env
+      command = var.image_tag == "" ? ["/bin/sh", "-c", "echo 'mailbox poll placeholder — real image runs the poll CLI'; exit 0"] : [
+        "npx", "tsx", "apps/workers/src/ingestion/poll-cli.ts"
+      ]
+      env = merge(local.worker_env, local.app_coordinates)
     }
   }
 

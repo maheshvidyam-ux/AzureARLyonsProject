@@ -1,13 +1,26 @@
 /**
- * API service entrypoint (Container App). Wires config + a Graph notification sink and starts
- * the server. The sink's enqueue is a stub that logs; it becomes a Service Bus send to the
- * `ingestion` queue in the next slice, where a worker fetches each message's attachments and
- * runs the pipeline.
+ * API service entrypoint (Container App). Wires:
+ *   - the Graph notification webhook (AR + AP mailboxes → Service Bus ingestion queues), and
+ *   - the reviewer workbench + manual-upload + settings routes, behind Entra Easy Auth.
+ *
+ * Authentication: this entrypoint ALWAYS uses the Entra Easy Auth authenticator (Azure Container
+ * Apps built-in auth validates the token at the edge and forwards `x-ms-client-principal`). The
+ * DEV header authenticator is never used here — local development runs the server via the dev
+ * harness (apps/web/dev-api.mts), not this entrypoint.
+ *
+ * Backend wiring is env-gated so the container boots even before everything is configured:
+ *   - Reviewer/upload/settings routes register when FABRIC_SQL_SERVER is set (operational DB).
+ *   - AR matching + AP uploads turn on when LAKEHOUSE_SQL_SERVER is set.
+ * Required secret in any environment that receives real Graph notifications: GRAPH_CLIENT_STATE.
  */
+import { createPool, fabricSqlConfigFromEnv, FabricSqlPersistence } from "@coa/persistence";
 import { buildServer } from "./server.js";
 import { loadConfig } from "./config.js";
 import { resolveIngestionPublisher } from "./publisher.js";
-import type { GraphNotificationSink } from "./types.js";
+import { easyAuthAuthenticator, roleMapFromEnv } from "./auth.js";
+import { defaultConnectionTester } from "./settings.js";
+import { buildUploadBundle } from "./uploads-pipeline.js";
+import type { GraphNotificationSink, ServerDeps } from "./types.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -32,18 +45,35 @@ async function main(): Promise<void> {
     graphAp = { async enqueueMessageIds(ids) { for (const id of ids) await apPublisher.publish({ messageId: id }); } };
   }
 
-  // NOTE: the reviewer workbench routes (/orders) are intentionally NOT wired here yet. They
-  // require the real Entra OIDC authenticator (a later slice) — serving them with the DEV
-  // header authenticator on a network-reachable endpoint would be a security hole (spec §3).
-  // They are fully built + tested via buildServer({ persistence, authenticate }).
-  const app = await buildServer({
+  // Entra Easy Auth: the platform forwards the signed-in identity as `x-ms-client-principal`.
+  // Optional EASY_AUTH_ROLE_MAP maps group object-ids → AppRoles when the tenant uses groups.
+  const authenticate = easyAuthAuthenticator({ roleMap: roleMapFromEnv(process.env.EASY_AUTH_ROLE_MAP) });
+
+  const deps: ServerDeps = {
     graphClientState: config.graphClientState,
     graph,
+    authenticate,
+    logger: true,
     ...(config.graphClientStateAp ? { graphClientStateAp: config.graphClientStateAp } : {}),
     ...(graphAp ? { graphAp } : {}),
-    logger: true,
-  });
+  };
 
+  // Reviewer workbench + uploads + settings — only when the operational DB is configured.
+  if (process.env.FABRIC_SQL_SERVER) {
+    const persistence = new FabricSqlPersistence(await createPool(fabricSqlConfigFromEnv()));
+    const bundle = await buildUploadBundle(persistence);
+    deps.persistence = persistence;
+    deps.uploads = bundle.uploads;
+    deps.connectionTester = defaultConnectionTester;
+    if (bundle.masters) deps.masters = bundle.masters;
+    console.log(
+      `[api] reviewer + upload + settings routes enabled (masters: ${bundle.masters ? "on" : "deferred"})`,
+    );
+  } else {
+    console.log("[api] FABRIC_SQL_SERVER not set — serving health + Graph webhook only");
+  }
+
+  const app = await buildServer(deps);
   await app.listen({ host: config.host, port: config.port });
 }
 

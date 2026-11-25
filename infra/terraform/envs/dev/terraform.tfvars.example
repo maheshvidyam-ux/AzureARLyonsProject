@@ -12,3 +12,21 @@ name_suffix = "ab12"
 fabric_admin_members = [
   "you@yourtenant.onmicrosoft.com",
 ]
+
+# Mailboxes the scheduled poll job delta-queries (least-privilege app-access policy, see go-live.md).
+# Leave "" to disable that side. ap_mailbox "" also disables the AP secret + queue wiring.
+ar_mailbox = "" # e.g. orders@lyonsmagnus.com
+ap_mailbox = "" # e.g. invoices@lyonsmagnus.com
+
+# Operational store (reviewer/upload DB) — SQL database in Fabric. Entra auth (not secrets). The SQL
+# endpoint is not a Terraform attribute of the capacity, so supply it here (see fabric-sql-dev note).
+fabric_sql_server   = "" # e.g. <workspace>.datawarehouse.fabric.microsoft.com
+fabric_sql_database = "" # e.g. coa-ops
+
+# ERP validation masters (Fabric Lakehouse SQL endpoint). "" = matching deferred + AP uploads off.
+lakehouse_sql_server   = "" # e.g. <workspace>.datawarehouse.fabric.microsoft.com
+lakehouse_sql_database = "" # e.g. gold
+
+# Container image tag to deploy. Leave "" for infra-only (placeholder image); scripts/deploy-dev.sh
+# sets it to the git sha on deploy. Do not hand-edit for a real deploy — let the script pass it.
+image_tag = ""

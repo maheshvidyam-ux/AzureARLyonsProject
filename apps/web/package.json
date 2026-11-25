@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "dev:api": "tsx dev-api.mts",
-    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "build": "tsc -p tsconfig.build.json --noEmit && vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "preview": "vite preview"
   },

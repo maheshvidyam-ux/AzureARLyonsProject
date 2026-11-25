@@ -13,26 +13,37 @@ variable "app_insights_connection_string" {
 variable "apps" {
   type = map(object({
     identity_id = string
+    # image set => pull this image (from the ACR registry); null => the placeholder hello-world.
+    image = optional(string)
     # target_port set => HTTP ingress is enabled on that port
     target_port = optional(number)
     external    = optional(bool, false)
     # Plain (non-secret) environment variables for the app's container. Entra auth means connection
-    # coordinates (Service Bus namespace, mailboxes, queue names) are NOT secrets. True secrets stay
-    # in Key Vault and are referenced via a `secret {}` block, not here.
+    # coordinates (Service Bus namespace, mailboxes, queue names) are NOT secrets.
     env = optional(map(string), {})
+    # Secret environment variables: ENV_NAME => Key Vault secret id. Each becomes a Container App
+    # secret (pulled via the app's user-assigned identity) exposed to the container as ENV_NAME.
+    secret_env = optional(map(string), {})
   }))
 }
 variable "jobs" {
   type = map(object({
     identity_id = string
+    image       = optional(string)
     cron        = string                      # UNIX cron, e.g. "*/5 * * * *"
     command     = optional(list(string))      # container entrypoint override (e.g. the poll CLI)
     args        = optional(list(string))
     timeout     = optional(number, 600)        # replica_timeout_in_seconds
     env         = optional(map(string), {})
+    secret_env  = optional(map(string), {})
   }))
   default     = {}
   description = "Scheduled (cron) Container App Jobs — e.g. the no-loss mailbox poll."
+}
+variable "registry_server" {
+  type        = string
+  default     = null
+  description = "ACR login server (e.g. acrcoadev.azurecr.io). When set, apps/jobs pull images from it via their user-assigned identity (AcrPull)."
 }
 # Phase-1 placeholder: a public hello-world image so an authenticated, empty app deploys to
 # dev (phase exit criterion). Real images move to ACR with a `registry {}` block in Phase 2.
@@ -67,9 +78,29 @@ resource "azurerm_container_app" "this" {
     identity_ids = [each.value.identity_id]
   }
 
+  # Pull from ACR with the app's user-assigned identity (AcrPull). Only when a registry + a real
+  # image are set; the placeholder hello-world image is public (no registry block needed).
+  dynamic "registry" {
+    for_each = (var.registry_server != null && each.value.image != null) ? [1] : []
+    content {
+      server   = var.registry_server
+      identity = each.value.identity_id
+    }
+  }
+
   secret {
     name  = "appinsights-connection-string"
     value = var.app_insights_connection_string
+  }
+
+  # One Container App secret per secret_env entry, sourced from Key Vault via the app identity.
+  dynamic "secret" {
+    for_each = each.value.secret_env
+    content {
+      name                = lower(replace(secret.key, "_", "-"))
+      key_vault_secret_id = secret.value
+      identity            = each.value.identity_id
+    }
   }
 
   template {
@@ -78,7 +109,7 @@ resource "azurerm_container_app" "this" {
 
     container {
       name   = each.key
-      image  = var.placeholder_image
+      image  = coalesce(each.value.image, var.placeholder_image)
       cpu    = 0.25
       memory = "0.5Gi"
 
@@ -92,6 +123,14 @@ resource "azurerm_container_app" "this" {
         content {
           name  = env.key
           value = env.value
+        }
+      }
+
+      dynamic "env" {
+        for_each = each.value.secret_env
+        content {
+          name        = env.key
+          secret_name = lower(replace(env.key, "_", "-"))
         }
       }
     }
@@ -133,15 +172,32 @@ resource "azurerm_container_app_job" "this" {
     identity_ids = [each.value.identity_id]
   }
 
+  dynamic "registry" {
+    for_each = (var.registry_server != null && each.value.image != null) ? [1] : []
+    content {
+      server   = var.registry_server
+      identity = each.value.identity_id
+    }
+  }
+
   secret {
     name  = "appinsights-connection-string"
     value = var.app_insights_connection_string
   }
 
+  dynamic "secret" {
+    for_each = each.value.secret_env
+    content {
+      name                = lower(replace(secret.key, "_", "-"))
+      key_vault_secret_id = secret.value
+      identity            = each.value.identity_id
+    }
+  }
+
   template {
     container {
       name    = each.key
-      image   = var.placeholder_image
+      image   = coalesce(each.value.image, var.placeholder_image)
       cpu     = 0.25
       memory  = "0.5Gi"
       command = each.value.command
@@ -156,6 +212,13 @@ resource "azurerm_container_app_job" "this" {
         content {
           name  = env.key
           value = env.value
+        }
+      }
+      dynamic "env" {
+        for_each = each.value.secret_env
+        content {
+          name        = env.key
+          secret_name = lower(replace(env.key, "_", "-"))
         }
       }
     }

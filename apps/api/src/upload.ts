@@ -65,11 +65,16 @@ export function syntheticUploadMessage(input: UploadInput): GraphMailMessage {
 
 /** Runs uploads through the AR order / AP invoice pipelines (inline). */
 export class PipelineUploadProcessor implements UploadProcessor {
-  constructor(private readonly deps: { order: PipelineDeps; invoice: InvoicePipelineDeps }) {}
+  // `invoice` is optional: AP uploads require the Lakehouse (invoice masters). When it is not
+  // configured, AR order uploads still work and AP uploads return a clear error.
+  constructor(private readonly deps: { order: PipelineDeps; invoice?: InvoicePipelineDeps }) {}
 
   async process(input: UploadInput): Promise<UploadOutcome> {
     const message = syntheticUploadMessage(input);
     if (input.module === "AP_INVOICE") {
+      if (!this.deps.invoice) {
+        throw new Error("AP invoice processing is not configured (a Lakehouse connection is required).");
+      }
       return mapInvoice(await processInvoice(this.deps.invoice, message, 0));
     }
     return mapOrder(await processAttachment(this.deps.order, message, 0));
